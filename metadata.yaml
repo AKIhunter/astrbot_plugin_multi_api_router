@@ -1,7 +1,36 @@
 name: astrbot_plugin_multi_api_router
 display_name: 多 API 模型路由
 short_desc: 将多个 OpenAI 兼容 API 组合为可自动分配、健康跳过和失败降级的 AstrBot Provider。
-desc: 同时提供「整体自动分配」与「指定上游」两种 AstrBot Provider；支持拖拽排序、健康检查跳过、连续失败暂停、主模型回退、工具能力筛选与模型思考开关。
+desc: |
+  把多个 OpenAI 兼容 API 组合成一个 AstrBot Provider。调用方仍使用
+  AstrBot 原生 Provider 接口，不需要知道插件内部的路由细节。
+
+  ## 两种使用模式
+
+  - **整体自动分配**：选择 `multi_api_router`，插件按页面从上到下的顺序
+    选择上游；失败自动尝试下一条线路。
+  - **指定某个上游**：选择 `multi_api_router:upstream_<编号>`，只调用该
+    上游，不自动切换，也不回退主模型。
+
+  ## 核心能力
+
+  - 在 AstrBot Provider 列表中直接选择整体路由或指定上游。
+  - 拖动整行调整调用顺序，页面编号自动重排。
+  - 健康检查不通的上游会被临时跳过并记录日志。
+  - 真实调用连续失败只会暂停上游，不会删除配置。
+  - 整体模式全部真实调用失败后，可回退 AstrBot 主模型一次。
+  - 带工具请求只使用声明支持工具调用的上游；没有可用上游时明确报错。
+  - 每个上游可独立开启模型思考能力，默认关闭。
+  - 新增 API 默认启用，修改后可立即保存并热生效。
+  - 底部保存提示支持撤销上一步输入、开关、新增、删除或排序操作。
+
+  ## 常见用法
+
+  - 后台摘要、分类等任务选择整体模式，由多个上游自动容错。
+  - 视觉、翻译等必须固定模型的任务选择对应的指定上游 Provider。
+  - 免费模型放在列表前面，稳定付费模型放在后面作为备用。
+
+  完整安装说明、调用代码、路由流程和配置示例请查看仓库 README。
 version: 1.3.1
 author: AKIhunter
 repo: https://github.com/AKIhunter/astrbot_plugin_multi_api_router
