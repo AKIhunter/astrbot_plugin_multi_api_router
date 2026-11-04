@@ -1,0 +1,608 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f5f7f9;
+  --surface: #ffffff;
+  --text: #18202a;
+  --muted: #697586;
+  --line: #d8dee6;
+  --accent: #146c5a;
+  --accent-hover: #0f5748;
+  --good: #16803c;
+  --bad: #bd3038;
+  --warn: #a16008;
+  --shadow: 0 8px 26px rgba(24, 32, 42, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 28px clamp(18px, 5vw, 56px) 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.eyebrow {
+  margin: 0 0 7px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.subtitle {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+main {
+  width: min(1120px, calc(100% - 32px));
+  margin: 22px auto 40px;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.summary div {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 16px 18px;
+  border-right: 1px solid var(--line);
+}
+
+.summary div:last-child {
+  border-right: 0;
+}
+
+.summary strong {
+  font-size: 22px;
+}
+
+.summary span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* 当前生效策略的一句话摘要（整体模式 / 指定上游模式） */
+.strategy-line {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* 指定上游模式下，详情区展示可直接在 AstrBot 里选用的 Provider ID */
+.pinned-hint {
+  margin: 0;
+  color: var(--muted);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pinned-hint:empty {
+  display: none;
+}
+
+/* 两列布局：左窄全局参数，右宽上游列表 */
+.layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+.col-global,
+.col-upstreams {
+  min-width: 0;
+}
+
+.col-global {
+  position: sticky;
+  top: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.panel-title {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.col-upstreams .panel-title {
+  padding: 0 2px;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-title-row .panel-title {
+  margin: 0;
+  padding: 0;
+}
+
+.panel-title-row .button {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.title-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.title-row-actions .button.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.delete-button-inline {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 6px 12px;
+  margin-right: 14px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--bad);
+  color: var(--bad);
+}
+
+.delete-button-inline:hover:not(:disabled) {
+  background: var(--bad);
+  color: #ffffff;
+}
+
+.global-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.upstream-list {
+  display: grid;
+  gap: 12px;
+}
+
+/* 上游卡片 */
+.upstream {
+  border: 1px solid var(--line);
+  border-left: 4px solid #8893a2;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.upstream.healthy {
+  border-left-color: var(--good);
+}
+
+.upstream.failed {
+  border-left-color: var(--bad);
+}
+
+.upstream-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upstream-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 15px 18px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.upstream-toggle:hover {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.upstream-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.check-button-inline {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 6px 12px;
+  margin-right: 14px;
+  font-size: 12px;
+}
+
+.slot {
+  color: var(--muted);
+  font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  flex-shrink: 0;
+}
+
+.upstream-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tag {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tag.on {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--accent);
+}
+
+.badge {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.badge.enabled {
+  border-color: color-mix(in srgb, var(--good) 40%, var(--line));
+  color: var(--good);
+}
+
+.health-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #8893a2;
+}
+
+.healthy .health-dot {
+  background: var(--good);
+}
+
+.failed .health-dot {
+  background: var(--bad);
+}
+
+.head-health {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chevron {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.18s ease;
+}
+
+.upstream-toggle.open .chevron {
+  transform: rotate(180deg);
+}
+
+/* 展开详情 */
+.upstream-body {
+  padding: 4px 18px 18px;
+  border-top: 1px solid var(--line);
+}
+
+.enable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.enable-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field.full {
+  grid-column: 1 / -1;
+}
+
+.field > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.field input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.field input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 13px;
+  align-self: end;
+}
+
+.inline-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+/* 详情区健康状态 + 检测按钮 */
+.health {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.health-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.health-result div {
+  display: grid;
+  gap: 4px;
+}
+
+.health-status {
+  font-size: 13px;
+}
+
+.health-detail {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.button {
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.button.dirty {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  max-width: min(360px, calc(100vw - 40px));
+  padding: 11px 15px;
+  border-radius: 5px;
+  background: var(--text);
+  color: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+.toast.error {
+  background: var(--bad);
+  color: #ffffff;
+}
+
+/* 页面内自绘确认对话框（sandbox iframe 无 allow-modals，原生 confirm 不可用） */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.confirm-overlay[hidden] {
+  display: none;
+}
+
+.confirm-box {
+  width: min(360px, calc(100vw - 40px));
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.confirm-text {
+  margin: 0 0 20px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.confirm-ok {
+  background: var(--bad);
+  border-color: var(--bad);
+}
+
+.confirm-ok:hover:not(:disabled) {
+  background: #9c232b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #13171c;
+    --surface: #1b2128;
+    --text: #edf1f5;
+    --muted: #a5afba;
+    --line: #343d47;
+    --accent: #50bda3;
+    --accent-hover: #3aa98f;
+    --shadow: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .col-global {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    align-items: flex-start;
+    padding: 22px 18px 18px;
+  }
+
+  main {
+    width: min(100% - 20px, 1120px);
+    margin-top: 10px;
+  }
+
+  .summary {
+    grid-template-columns: 1fr;
+  }
+
+  .summary div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .summary div:last-child {
+    border-bottom: 0;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .field.full {
+    grid-column: auto;
+  }
+
+  .upstream-toggle {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+  }
+
+  .health {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

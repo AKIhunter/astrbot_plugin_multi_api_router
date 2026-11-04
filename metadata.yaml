@@ -1,0 +1,16 @@
+name: astrbot_plugin_multi_api_router
+display_name: 多 API 模型路由
+short_desc: 将多个 OpenAI 兼容 API 组合为可自动分配、健康跳过和失败降级的 AstrBot Provider。
+desc: 同时提供「整体自动分配」与「指定上游」两种 AstrBot Provider；按优先级路由，健康检查不通的上游自动跳过，连续失败只暂停不删除，真实调用全部失败才回退主模型，带工具请求不会静默降级。
+version: v1.3.0
+author: AKIhunter
+repo: https://github.com/AKIhunter/astrbot_plugin_multi_api_router
+astrbot_version: ">=4.29.0"
+tags:
+  - llm
+  - router
+  - fallback
+  - provider
+views:
+  - name: upstreams
+    description: 管理上游、优先级与健康检查结果

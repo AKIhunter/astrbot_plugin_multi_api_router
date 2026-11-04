@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>模型 API 上游配置与检测</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">MULTI API ROUTER</p>
+        <h1>上游配置</h1>
+        <p class="subtitle" id="subtitle">正在读取配置</p>
+      </div>
+      <div class="topbar-actions">
+        <button class="button secondary" id="refresh-button" type="button">刷新</button>
+        <button class="button" id="save-button" type="button">保存全部</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="summary" aria-label="上游摘要">
+        <div><strong id="enabled-count">0</strong><span>已启用</span></div>
+        <div><strong id="healthy-count">0</strong><span>检测正常</span></div>
+        <div><strong id="configured-count">0</strong><span>配置完整</span></div>
+      </section>
+
+      <p class="strategy-line" id="strategy-line">正在读取当前策略</p>
+
+      <div class="layout">
+        <aside class="col-global" aria-label="运行策略">
+          <h2 class="panel-title">运行策略</h2>
+          <div class="global-fields" id="global-fields"></div>
+        </aside>
+
+        <section class="col-upstreams" aria-label="上游列表">
+          <div class="panel-title-row">
+            <h2 class="panel-title">上游 API（按优先级排序）</h2>
+            <div class="title-row-actions">
+              <button class="button secondary" id="add-upstream" type="button">新增 API</button>
+            </div>
+          </div>
+          <div class="upstream-list" id="upstream-list" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+
+    <template id="upstream-template">
+      <article class="upstream">
+        <div class="upstream-head">
+          <button type="button" class="upstream-toggle" aria-expanded="false">
+            <span class="slot"></span>
+            <span class="upstream-name"></span>
+            <span class="tag tool-tag">工具</span>
+            <span class="badge state-badge"></span>
+            <span class="health-dot"></span>
+            <span class="head-health"></span>
+            <span class="chevron" aria-hidden="true">▾</span>
+          </button>
+          <button class="button check-button-inline" type="button">检测</button>
+        </div>
+
+        <div class="upstream-body" hidden>
+          <label class="enable-toggle">
+            <input type="checkbox" class="enabled" />
+            <span>启用</span>
+          </label>
+          <p class="pinned-hint"></p>
+          <div class="form-grid">
+            <label class="field">
+              <span>名称</span>
+              <input type="text" class="name" maxlength="80" placeholder="例如 SiliconFlow" />
+            </label>
+            <label class="field">
+              <span>优先级</span>
+              <input type="number" class="priority" step="1" placeholder="数值越小越先" />
+            </label>
+            <label class="field full">
+              <span>API Base</span>
+              <input type="text" class="api-base" maxlength="2048" placeholder="https://api.siliconflow.cn/v1" />
+            </label>
+            <label class="field full">
+              <span>API Key</span>
+              <input type="password" class="api-key" maxlength="2048" autocomplete="off" placeholder="sk-..." />
+            </label>
+            <label class="field full">
+              <span>模型 ID</span>
+              <input type="text" class="model" maxlength="256" placeholder="Qwen/Qwen2.5-7B-Instruct" />
+            </label>
+            <label class="inline-check">
+              <input type="checkbox" class="tools" />
+              <span>支持工具调用</span>
+            </label>
+          </div>
+          <div class="health">
+            <div class="health-result">
+              <span class="health-dot"></span>
+              <div>
+                <strong class="health-status">尚未检测</strong>
+                <span class="health-detail">检测结果会用于路由时跳过不通的上游</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <div class="toast" id="toast" hidden></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

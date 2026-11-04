@@ -1,0 +1,1088 @@
+{
+  "enabled": {
+    "description": "启用路由 Provider",
+    "type": "bool",
+    "default": true
+  },
+  "provider_id": {
+    "description": "在 AstrBot 中显示的 Provider ID",
+    "type": "string",
+    "default": "multi_api_router",
+    "hint": "其他插件选择模型时填写这个 ID。修改后需要重载插件或重启 AstrBot。"
+  },
+  "request_timeout_seconds": {
+    "description": "每个上游的请求超时（秒）",
+    "type": "int",
+    "default": 45,
+    "slider": {
+      "min": 5,
+      "max": 180,
+      "step": 5
+    }
+  },
+  "max_attempts": {
+    "description": "单次请求最多尝试几个上游",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "hint": "每个上游只请求一次；此值限制最坏情况下的调用次数。"
+  },
+  "failure_threshold": {
+    "description": "连续失败多少次后熔断",
+    "type": "int",
+    "default": 2,
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    }
+  },
+  "cooldown_seconds": {
+    "description": "熔断冷却时间（秒）",
+    "type": "int",
+    "default": 300,
+    "slider": {
+      "min": 30,
+      "max": 3600,
+      "step": 30
+    }
+  },
+  "max_concurrency": {
+    "description": "路由器最大并发请求数",
+    "type": "int",
+    "default": 4,
+    "slider": {
+      "min": 1,
+      "max": 32,
+      "step": 1
+    }
+  },
+  "max_input_chars": {
+    "description": "单次请求最大输入字符数",
+    "type": "int",
+    "default": 48000,
+    "hint": "超出后直接拒绝，不调用任何上游。字符数是跨模型通用的保守预算。"
+  },
+  "max_output_tokens": {
+    "description": "单次请求最大输出 Token",
+    "type": "int",
+    "default": 2048,
+    "hint": "调用方请求更大值时会被压到此上限。"
+  },
+  "health_check_timeout_seconds": {
+    "description": "上游检测超时（秒）",
+    "type": "int",
+    "default": 15,
+    "slider": {
+      "min": 5,
+      "max": 60,
+      "step": 5
+    },
+    "hint": "检测请求不重试，也不会改变业务熔断计数。"
+  },
+  "skip_unhealthy_upstreams": {
+    "description": "健康检查不通时跳过该上游",
+    "type": "bool",
+    "default": true,
+    "hint": "检测明确失败的上游在有效期内会被跳过并写日志；不会删除上游。"
+  },
+  "health_skip_ttl_seconds": {
+    "description": "健康检查结果有效期（秒）",
+    "type": "int",
+    "default": 21600,
+    "hint": "超过有效期后不再据此跳过，避免过期结果误拦真实请求。"
+  },
+  "fallback_to_main_model": {
+    "description": "真实调用失败后回退主模型",
+    "type": "bool",
+    "default": true,
+    "hint": "只在上游真实调用失败时回退一次；健康检查跳过不算失败。"
+  },
+  "fallback_provider_id": {
+    "description": "回退使用的 Provider ID",
+    "type": "string",
+    "default": "",
+    "hint": "留空表示使用 AstrBot 当前默认主模型。"
+  },
+  "auto_bind_enabled": {
+    "description": "自动绑定低风险后台任务",
+    "type": "bool",
+    "default": true,
+    "hint": "仅处理内置白名单字段，不接管主对话、私聊、长期记忆、图片理解或工具调用。"
+  },
+  "auto_bind_require_ready_upstream": {
+    "description": "有可用上游后才绑定",
+    "type": "bool",
+    "default": true,
+    "hint": "建议保持开启，避免尚未填写 API 时中断后台任务。"
+  },
+  "auto_bind_only_empty": {
+    "description": "仅绑定空白或默认字段",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后不会覆盖你手动指定的其他 Provider。"
+  },
+  "auto_bind_restore_on_disable": {
+    "description": "关闭自动绑定时恢复旧值",
+    "type": "bool",
+    "default": true
+  },
+  "auto_bind_bilibili": {
+    "description": "绑定 B站后台任务",
+    "type": "bool",
+    "default": true,
+    "hint": "包括摘要、内容生成、候选预筛和日程计划；不包括评论、私信和主聊天。"
+  },
+  "auto_bind_memewiki": {
+    "description": "绑定梗百科轻量门控",
+    "type": "bool",
+    "default": true,
+    "hint": "只绑定是否需要查梗的轻量判断模型。"
+  },
+  "upstream_1": {
+    "description": "上游 1",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "SiliconFlow"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": "https://api.siliconflow.cn/v1"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写服务商模型列表中的完整 ID。"
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 10,
+        "hint": "数值越小越先使用。"
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型的思维链（Qwen3 / 混元 / DeepSeek-R1 等），让它直接输出 JSON、秒回。留空则不发。"
+      }
+    }
+  },
+  "upstream_2": {
+    "description": "上游 2",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 1"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 20
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_3": {
+    "description": "上游 3",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 2"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 30
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_4": {
+    "description": "上游 4",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 3"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 40
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_5": {
+    "description": "上游 5",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 4"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 50
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_6": {
+    "description": "上游 6",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 5"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 60
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_7": {
+    "description": "上游 7",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 6"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 70
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_8": {
+    "description": "上游 8",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 7"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 80
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_9": {
+    "description": "上游 9",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 8"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 90
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_10": {
+    "description": "上游 10",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 9"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 100
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_11": {
+    "description": "上游 11",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 10"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 110
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_12": {
+    "description": "上游 12",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 11"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 120
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_13": {
+    "description": "上游 13",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 12"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 130
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_14": {
+    "description": "上游 14",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 13"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 140
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_15": {
+    "description": "上游 15",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 14"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 150
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_16": {
+    "description": "上游 16",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 15"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 160
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_17": {
+    "description": "上游 17",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 16"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 170
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_18": {
+    "description": "上游 18",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 17"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 180
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_19": {
+    "description": "上游 19",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 18"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 190
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  },
+  "upstream_20": {
+    "description": "上游 20",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": false
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "Backup API 19"
+      },
+      "api_base": {
+        "description": "API Base",
+        "type": "string",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": ""
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "default": ""
+      },
+      "priority": {
+        "description": "优先级",
+        "type": "int",
+        "default": 200
+      },
+      "supports_tools": {
+        "description": "支持工具调用",
+        "type": "bool",
+        "default": true
+      },
+      "extra_body": {
+        "description": "附加请求体参数（JSON 对象）",
+        "type": "string",
+        "default": "",
+        "hint": "额外合并进请求 body 的 JSON，例如 {\"enable_thinking\": false} 可关掉推理模型思维链。"
+      }
+    }
+  }
+}

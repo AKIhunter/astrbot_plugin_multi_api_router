@@ -1,0 +1,7 @@
+# 插件运行数据（含配置与密钥），不入库
+data/
+__pycache__/
+*.pyc
+*.bak
+*.bak.*
+.DS_Store
