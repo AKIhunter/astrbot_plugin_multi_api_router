@@ -199,7 +199,7 @@ function updateSummary() {
     `${state.provider_id || "multi_api_router"} · ${state.runtime_upstream_count ?? 0} 个运行中上游`;
   document.querySelector("#subtitle").textContent =
     `整体模式：${strategy.overall_provider_id || state.provider_id || "multi_api_router"}` +
-    ` · 单个上游：${strategy.pinned_provider_prefix || "multi_api_router:upstream_"}<编号>` +
+    " · 单个上游：按上游名称选择" +
     ` · 运行中 ${state.runtime_upstream_count ?? 0} 个`;
 }
 
@@ -273,8 +273,8 @@ function render() {
     fragment.querySelector(".model").value = escapeText(upstream.model);
     fragment.querySelector(".tools").checked = Boolean(upstream.supports_tools);
     fragment.querySelector(".thinking").checked = Boolean(upstream.enable_thinking);
-    fragment.querySelector(".pinned-hint").textContent = upstream.provider_id
-      ? `在 AstrBot 中选择此 Provider 可直接使用该上游：${upstream.provider_id}`
+    fragment.querySelector(".pinned-hint").textContent = upstream.provider_label
+      ? `在 AstrBot 或其他插件中选择「${upstream.provider_label}」即可固定使用该上游`
       : "";
 
     const status = fragment.querySelector(".health-status");

@@ -5,7 +5,7 @@
 ![Banner](.github/img/Banner.png)
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29%2B-50bda3)](https://github.com/AstrBotDevs/AstrBot)
-![Version](https://img.shields.io/badge/Version-1.3.1-e9b949)
+![Version](https://img.shields.io/badge/Version-1.3.2-e9b949)
 [![Stars](https://img.shields.io/github/stars/AKIhunter/astrbot_plugin_multi_api_router?style=flat&color=e9b949)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AKIhunter/astrbot_plugin_multi_api_router)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/commits/main)
 
@@ -59,9 +59,11 @@ function calling，请手动取消“支持工具调用”。
 | 模式 | Provider ID | 行为 | 适合场景 |
 | --- | --- | --- | --- |
 | 整体自动分配 | `multi_api_router` | 按页面顺序选择上游，支持健康跳过、失败切换和主模型回退 | 摘要、分类、预筛、文案等后台任务 |
-| 指定某个上游 | `multi_api_router:upstream_<编号>` | 只调用目标上游，不自动切换、不回退 | 视觉、翻译或必须固定模型的任务 |
+| 指定某个上游 | 选择器显示上游名称和模型 | 只调用目标上游，不自动切换、不回退 | 视觉、翻译或必须固定模型的任务 |
 
-每个已启用上游都会自动注册一个专属 Provider，例如：
+每个已启用上游都会自动注册一个专属 Provider。其他插件的模型选择器会显示
+`qwen7b（Qwen/Qwen2.5-7B-Instruct）` 这类可读名称，不显示内部路由前缀。
+内部仍使用稳定 ID 保存配置，例如：
 
 ```text
 multi_api_router:upstream_1
@@ -203,8 +205,10 @@ function calling。
 
 ## 更新日志
 
-当前版本：`v1.3.1`
+当前版本：`v1.3.2`
 
+- 模型选择器改为显示上游名称和模型，不再暴露内部路由前缀。
+- Provider 内部 ID 保持不变，已有插件配置无需迁移。
 - 支持整体自动分配与指定上游两种 AstrBot Provider。
 - 接入健康检查跳过、连续失败暂停和主模型回退。
 - 支持整行拖拽排序与自动编号。

@@ -112,6 +112,14 @@ class MultiApiRouterProvider(Provider):
             raw = plugin_config.get(f"upstream_{self.pinned_slot}") or {}
             if isinstance(raw, dict) and str(raw.get("model") or "").strip():
                 pinned_model = str(raw.get("model")).strip()
+        display_name = str(
+            original_config.get("display_name")
+            or original_config.get("label")
+            or ""
+        ).strip()
+        parent_provider_id = str(
+            original_config.get("parent_provider_id") or ""
+        ).strip()
         super().__init__(
             {
                 "id": provider_id,
@@ -119,6 +127,11 @@ class MultiApiRouterProvider(Provider):
                 "model": pinned_model,
                 "key": [""],
                 "upstream_slot": self.pinned_slot,
+                # ID 保持稳定供调用方保存；选择器优先展示干净名称。
+                "display_name": display_name,
+                "label": display_name,
+                "name": display_name,
+                "parent_provider_id": parent_provider_id,
             },
             provider_settings or {},
         )
@@ -660,7 +673,7 @@ class MultiApiRouterProvider(Provider):
     PLUGIN_NAME,
     "AKIhunter",
     "多个 OpenAI 兼容 API 的优先级路由、熔断与自动降级 Provider",
-    "1.3.1",
+    "1.3.2",
 )
 class MultiApiRouterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -704,11 +717,19 @@ class MultiApiRouterPlugin(Star):
     def _pinned_provider_id(slot: int) -> str:
         return f"{PINNED_PROVIDER_PREFIX}{slot}"
 
+    @staticmethod
+    def _upstream_provider_label(upstream: UpstreamState) -> str:
+        name = str(upstream.name or "").strip()
+        model = str(upstream.client.get_model() or "").strip()
+        return name or model or f"上游 {upstream.slot}"
+
     def _provider_entry(
         self,
         provider_id: str,
         model: str,
         slot: int = 0,
+        display_name: str = "",
+        parent_provider_id: str = "",
     ) -> dict:
         entry = {
             "id": provider_id,
@@ -716,10 +737,14 @@ class MultiApiRouterPlugin(Star):
             "provider_type": "chat_completion",
             "model": model,
             "enable": True,
+            "display_name": display_name,
+            "label": display_name,
+            "name": display_name,
         }
         if slot:
             # AstrBot Provider 条目本身不认识这个字段，插件实例化时用它锁定上游。
             entry["upstream_slot"] = slot
+            entry["parent_provider_id"] = parent_provider_id
         return entry
 
     async def _close_router_instance(self, inst: "MultiApiRouterProvider") -> None:
@@ -782,7 +807,9 @@ class MultiApiRouterPlugin(Star):
             await self._close_router_instance(existing)
         self._router_instances = []
 
-        router = MultiApiRouterProvider(self.config)
+        overall_config = dict(self.config)
+        overall_config["display_name"] = "多 API 路由（自动）"
+        router = MultiApiRouterProvider(overall_config)
         provider_id = router.meta().id
         existing = provider_manager.inst_map.get(provider_id)
         if existing is not None:
@@ -801,7 +828,13 @@ class MultiApiRouterPlugin(Star):
         router.health_lookup = self._health_results.get
         router.fallback_resolver = self._resolve_fallback_provider
         instances = [router]
-        entries = [self._provider_entry(provider_id, "automatic")]
+        entries = [
+            self._provider_entry(
+                provider_id,
+                "automatic",
+                display_name="多 API 路由（自动）",
+            )
+        ]
 
         # 为每个已配置上游注册一个可直接在 AstrBot 中选择的 Provider。
         for upstream in router.upstreams:
@@ -809,6 +842,8 @@ class MultiApiRouterPlugin(Star):
             pinned_config = dict(self.config)
             pinned_config["provider_id"] = pinned_id
             pinned_config["upstream_slot"] = upstream.slot
+            pinned_config["display_name"] = self._upstream_provider_label(upstream)
+            pinned_config["parent_provider_id"] = provider_id
             pinned = MultiApiRouterProvider(pinned_config)
             pinned.health_lookup = self._health_results.get
             # 指定上游模式不自动降级，也不回退主模型。
@@ -819,6 +854,8 @@ class MultiApiRouterPlugin(Star):
                     pinned_id,
                     pinned.meta().model or upstream.client.get_model(),
                     upstream.slot,
+                    self._upstream_provider_label(upstream),
+                    provider_id,
                 )
             )
 
@@ -1230,6 +1267,7 @@ class MultiApiRouterPlugin(Star):
             "enable_thinking": MultiApiRouterProvider._enable_thinking_value(raw),
             "checking": slot in self._health_inflight,
             "provider_id": self._pinned_provider_id(slot),
+            "provider_label": str(raw.get("name") or raw.get("model") or f"上游 {slot}"),
             "health": self._health_results.get(slot),
         }
 
@@ -1430,6 +1468,7 @@ class MultiApiRouterPlugin(Star):
             "supports_tools": bool(raw.get("supports_tools", True)),
             "enable_thinking": MultiApiRouterProvider._enable_thinking_value(raw),
             "provider_id": self._pinned_provider_id(slot),
+            "provider_label": str(raw.get("name") or model or f"上游 {slot}"),
             "health": self._health_results.get(slot),
         }
 
