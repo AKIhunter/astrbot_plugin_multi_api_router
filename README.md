@@ -5,7 +5,7 @@
 ![Banner](.github/img/Banner.png)
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29%2B-50bda3)](https://github.com/AstrBotDevs/AstrBot)
-![Version](https://img.shields.io/badge/Version-1.3.2-e9b949)
+![Version](https://img.shields.io/badge/Version-1.3.3-e9b949)
 [![Stars](https://img.shields.io/github/stars/AKIhunter/astrbot_plugin_multi_api_router?style=flat&color=e9b949)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AKIhunter/astrbot_plugin_multi_api_router)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/commits/main)
 
@@ -53,6 +53,10 @@ AstrBot 原生 Provider 接口，插件在内部完成排序、健康跳过、�
 
 新增 API 默认启用、默认声明支持工具调用、默认关闭思考能力。若上游不支持
 function calling，请手动取消“支持工具调用”。
+
+取消“启用此上游”后，展示条会显示“已禁用”。整体 `multi_api_router` 会跳过
+该 API，并继续按页面从上到下的顺序使用其余已启用上游；该 API 的指定上游
+选项也会从 AstrBot 与其他插件的模型选择器中移除。
 
 ## 两种 Provider 模式
 
@@ -205,8 +209,11 @@ function calling。
 
 ## 更新日志
 
-当前版本：`v1.3.2`
+当前版本：`v1.3.3`
 
+- 修复“启用此上游”复选框与状态徽标类名冲突，历史 API 可正确显示勾选状态。
+- 禁用上游会立即显示“已禁用”，保存后整体路由跳过该 API，并移除其指定选项。
+- 配置完整但缺少旧版 `enabled` 字段的上游默认按启用处理。
 - 模型选择器改为显示上游名称和模型，不再暴露内部路由前缀。
 - Provider 内部 ID 保持不变，已有插件配置无需迁移。
 - 支持整体自动分配与指定上游两种 AstrBot Provider。

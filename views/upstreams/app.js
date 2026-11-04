@@ -96,7 +96,7 @@ function syncStateFromForm() {
     const slot = Number(article.dataset.slot);
     const item = state.upstreams.find((upstream) => Number(upstream.slot) === slot);
     if (!item) return;
-    item.enabled = article.querySelector(".enabled").checked;
+    item.enabled = article.querySelector(".upstream-enabled").checked;
     item.name = article.querySelector(".name").value.trim();
     item.api_base = article.querySelector(".api-base").value.trim();
     item.api_key = article.querySelector(".api-key").value.trim();
@@ -238,16 +238,20 @@ function render() {
     }
 
     const badge = fragment.querySelector(".state-badge");
-    if (!upstream.configured) {
-      badge.textContent = "配置不完整";
-      badge.classList.add("muted");
-    } else if (!upstream.enabled) {
-      badge.textContent = "未启用";
-      badge.classList.add("muted");
-    } else {
-      badge.textContent = "已启用";
-      badge.classList.add("enabled");
-    }
+    const updateEnabledBadge = () => {
+      badge.className = "badge state-badge";
+      if (!upstream.enabled) {
+        badge.textContent = "已禁用";
+        badge.classList.add("muted");
+      } else if (!upstream.configured) {
+        badge.textContent = "配置不完整";
+        badge.classList.add("muted");
+      } else {
+        badge.textContent = "已启用";
+        badge.classList.add("enabled");
+      }
+    };
+    updateEnabledBadge();
 
     const headHealth = fragment.querySelector(".head-health");
     if (health) {
@@ -266,7 +270,14 @@ function render() {
     head.appendChild(deleteButton);
 
     // 详情区字段
-    fragment.querySelector(".enabled").checked = Boolean(upstream.enabled);
+    const enabledInput = fragment.querySelector(".upstream-enabled");
+    enabledInput.checked = Boolean(upstream.enabled);
+    enabledInput.addEventListener("change", () => {
+      upstream.enabled = enabledInput.checked;
+      updateEnabledBadge();
+      updateSummary();
+      markDirty();
+    });
     fragment.querySelector(".name").value = escapeText(upstream.name);
     fragment.querySelector(".api-base").value = escapeText(upstream.api_base);
     fragment.querySelector(".api-key").value = escapeText(upstream.api_key || "");
@@ -352,6 +363,7 @@ function render() {
 
     // 编辑输入即标记未保存（详情区里的输入，含折叠态）
     article.querySelectorAll("input").forEach((input) => {
+      if (input === enabledInput) return;
       input.addEventListener(input.type === "checkbox" ? "change" : "input", markDirty);
     });
 
@@ -514,7 +526,7 @@ function collectPayload() {
     const slot = article.dataset.slot;
     const order = visibleArticles.indexOf(article);
     payload[`upstream_${slot}`] = {
-      enabled: article.querySelector(".enabled").checked,
+      enabled: article.querySelector(".upstream-enabled").checked,
       name: article.querySelector(".name").value.trim(),
       api_base: article.querySelector(".api-base").value.trim(),
       api_key: article.querySelector(".api-key").value.trim(),

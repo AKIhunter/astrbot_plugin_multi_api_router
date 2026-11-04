@@ -240,6 +240,19 @@ class MultiApiRouterProvider(Provider):
             return bool(body.get("enable_thinking", False))
         return False
 
+    @staticmethod
+    def _upstream_enabled(raw: dict) -> bool:
+        """空槽位默认禁用；配置完整且未显式设置时默认启用。"""
+        if not isinstance(raw, dict):
+            return False
+        if "enabled" in raw:
+            return bool(raw.get("enabled"))
+        return bool(
+            str(raw.get("api_base") or "").strip()
+            and str(raw.get("api_key") or "").strip()
+            and str(raw.get("model") or "").strip()
+        )
+
     def _build_upstreams(self, plugin_config: dict) -> list[UpstreamState]:
         timeout = self._bounded_int(
             plugin_config.get("request_timeout_seconds"), 45, 5, 600
@@ -247,7 +260,8 @@ class MultiApiRouterProvider(Provider):
         upstreams: list[UpstreamState] = []
         for index in range(1, MAX_UPSTREAMS + 1):
             raw = plugin_config.get(f"upstream_{index}") or {}
-            if not isinstance(raw, dict) or not raw.get("enabled", False):
+            # 整体模式和指定上游列表都只包含启用项；禁用项不会参与排序或调用。
+            if not isinstance(raw, dict) or not self._upstream_enabled(raw):
                 continue
             api_base = str(raw.get("api_base") or "").strip().rstrip("/")
             api_key = str(raw.get("api_key") or "").strip()
@@ -673,7 +687,7 @@ class MultiApiRouterProvider(Provider):
     PLUGIN_NAME,
     "AKIhunter",
     "多个 OpenAI 兼容 API 的优先级路由、熔断与自动降级 Provider",
-    "1.3.2",
+    "1.3.3",
 )
 class MultiApiRouterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1254,7 +1268,7 @@ class MultiApiRouterPlugin(Star):
         )
         return {
             "slot": slot,
-            "enabled": bool(raw.get("enabled", False)),
+            "enabled": MultiApiRouterProvider._upstream_enabled(raw),
             "configured": configured,
             "name": str(raw.get("name") or f"Upstream {slot}"),
             "api_base": api_base,
@@ -1456,7 +1470,7 @@ class MultiApiRouterPlugin(Star):
         model = str(raw.get("model") or "").strip()
         return {
             "slot": slot,
-            "enabled": bool(raw.get("enabled", False)),
+            "enabled": MultiApiRouterProvider._upstream_enabled(raw),
             # 页面需要这两个字段来判断状态与展示健康结果；
             # 之前只返回配置值，导致加载后全部显示「配置不完整 / 未检测」。
             "configured": bool(api_base and api_key and model),
@@ -1580,11 +1594,16 @@ class MultiApiRouterPlugin(Star):
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError(f"上游 {slot} 包含不支持的字段: {sorted(unknown)}")
-        enabled = bool(raw.get("enabled", False))
         name = str(raw.get("name") or "").strip()[:80]
         api_base = str(raw.get("api_base") or "").strip()[:2048]
         api_key = str(raw.get("api_key") or "").strip()[:2048]
         model = str(raw.get("model") or "").strip()[:256]
+        # API 已配置且调用方未传 enabled 时默认启用；显式 false 始终优先。
+        enabled = (
+            bool(raw.get("enabled"))
+            if "enabled" in raw
+            else bool(api_base and api_key and model)
+        )
         priority = self._bounded_priority(raw.get("priority"), slot * 10)
         # 默认开启工具调用；只有用户明确取消时才保存为 False。
         supports_tools = bool(raw.get("supports_tools", True))
