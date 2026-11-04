@@ -7,6 +7,8 @@ const toastElement = document.querySelector("#toast");
 let state = { upstreams: [], global: {}, strategy: {} };
 let dirty = false;
 let pendingDelete = new Set();
+// 页面只展示「已启用 / 配置完整 / 本次新加」的上游，隐藏历史遗留的空槽位。
+const addedSlots = new Set();
 const expanded = new Set();
 const MAX_UPSTREAMS = 20;
 
@@ -106,8 +108,13 @@ function updateSummary() {
 
 function render() {
   list.replaceChildren();
+  // 隐藏既未启用、也没填完整的空槽位，避免历史备份槽位把页面拉得很长；
+  // 本次点击「新增 API」的槽位始终显示，方便填写。
+  const visible = state.upstreams.filter(
+    (item) => item.enabled || item.configured || addedSlots.has(item.slot),
+  );
   // 数值越小越优先；页面顺序与真实调用顺序一致。
-  const ordered = [...state.upstreams].sort(
+  const ordered = [...visible].sort(
     (a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.slot - b.slot,
   );
   for (const upstream of ordered) {
@@ -224,6 +231,7 @@ async function load() {
   try {
     state = await bridge.apiGet("upstreams/config");
     pendingDelete.clear();
+    addedSlots.clear();
     renderGlobalFields();
     render();
     clearDirty();
@@ -256,9 +264,27 @@ async function checkUpstream(slot, ...buttons) {
 }
 
 function addUpstream() {
-  const slots = state.upstreams.map((item) => item.slot);
-  const nextSlot = (slots.length ? Math.max(...slots) : 0) + 1;
-  if (nextSlot > MAX_UPSTREAMS) {
+  // 优先复用配置里已存在但页面隐藏的空槽位（历史备份槽位），
+  // 避免直接顶到 20 个上限而无法新增。
+  const reusable = state.upstreams.find(
+    (item) => !item.enabled && !item.configured && !addedSlots.has(item.slot),
+  );
+  if (reusable) {
+    addedSlots.add(reusable.slot);
+    expanded.add(String(reusable.slot));
+    render();
+    markDirty();
+    return;
+  }
+  const used = new Set(state.upstreams.map((item) => item.slot));
+  let nextSlot = 0;
+  for (let slot = 1; slot <= MAX_UPSTREAMS; slot += 1) {
+    if (!used.has(slot)) {
+      nextSlot = slot;
+      break;
+    }
+  }
+  if (!nextSlot) {
     showToast(`最多支持 ${MAX_UPSTREAMS} 个上游`, true);
     return;
   }
@@ -276,6 +302,7 @@ function addUpstream() {
     health: null,
     provider_id: "",
   });
+  addedSlots.add(nextSlot);
   expanded.add(String(nextSlot));
   render();
   markDirty();
@@ -291,6 +318,7 @@ function deleteUpstream(slot) {
       if (!ok) return;
       state.upstreams.splice(index, 1);
       expanded.delete(String(slot));
+      addedSlots.delete(slot);
       pendingDelete.add(slot);
       render();
       markDirty();

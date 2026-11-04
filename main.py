@@ -1391,16 +1391,23 @@ class MultiApiRouterPlugin(Star):
         raw = self.config.get(f"upstream_{slot}") or {}
         if not isinstance(raw, dict):
             raw = {}
+        api_base = str(raw.get("api_base") or "").strip()
+        api_key = str(raw.get("api_key") or "").strip()
+        model = str(raw.get("model") or "").strip()
         return {
             "slot": slot,
             "enabled": bool(raw.get("enabled", False)),
+            # 页面需要这两个字段来判断状态与展示健康结果；
+            # 之前只返回配置值，导致加载后全部显示「配置不完整 / 未检测」。
+            "configured": bool(api_base and api_key and model),
             "name": str(raw.get("name") or "").strip(),
-            "api_base": str(raw.get("api_base") or "").strip(),
-            "api_key": str(raw.get("api_key") or "").strip(),
-            "model": str(raw.get("model") or "").strip(),
+            "api_base": api_base,
+            "api_key": api_key,
+            "model": model,
             "priority": int(raw.get("priority", slot * 10)),
             "supports_tools": bool(raw.get("supports_tools", True)),
             "provider_id": self._pinned_provider_id(slot),
+            "health": self._health_results.get(slot),
         }
 
     async def api_upstreams_config(self):
