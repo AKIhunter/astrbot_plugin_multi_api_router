@@ -174,15 +174,21 @@
         "hint": "填写服务商模型列表中的完整 ID。"
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
         "default": 10,
-        "hint": "数值越小越先使用。"
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。数值越小越先使用。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -222,14 +228,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 20
+        "default": 20,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -269,14 +282,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 30
+        "default": 30,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -316,14 +336,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 40
+        "default": 40,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -363,14 +390,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 50
+        "default": 50,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -410,14 +444,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 60
+        "default": 60,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -457,14 +498,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 70
+        "default": 70,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -504,14 +552,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 80
+        "default": 80,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -551,14 +606,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 90
+        "default": 90,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -598,14 +660,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 100
+        "default": 100,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -645,14 +714,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 110
+        "default": 110,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -692,14 +768,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 120
+        "default": 120,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -739,14 +822,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 130
+        "default": 130,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -786,14 +876,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 140
+        "default": 140,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -833,14 +930,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 150
+        "default": 150,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -880,14 +984,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 160
+        "default": 160,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -927,14 +1038,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 170
+        "default": 170,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -974,14 +1092,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 180
+        "default": 180,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -1021,14 +1146,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 190
+        "default": 190,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",
@@ -1068,14 +1200,21 @@
         "default": ""
       },
       "priority": {
-        "description": "优先级",
+        "description": "内部排序值",
         "type": "int",
-        "default": 200
+        "default": 200,
+        "hint": "插件页面会按拖拽顺序自动维护；一般不需要手动修改。"
       },
       "supports_tools": {
         "description": "支持工具调用",
         "type": "bool",
         "default": true
+      },
+      "enable_thinking": {
+        "description": "启用思考能力",
+        "type": "bool",
+        "default": false,
+        "hint": "仅对支持 enable_thinking 的推理模型生效。默认关闭，关闭时请求体会携带 enable_thinking=false。"
       },
       "extra_body": {
         "description": "附加请求体参数（JSON 对象）",

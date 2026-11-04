@@ -19,6 +19,7 @@
 
 body {
   margin: 0;
+  padding-bottom: 72px;
   min-width: 320px;
   background: var(--bg);
   color: var(--text);
@@ -112,7 +113,6 @@ main {
   display: none;
 }
 
-/* 两列布局：左窄全局参数，右宽上游列表 */
 .layout {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
@@ -198,6 +198,56 @@ main {
   gap: 12px;
 }
 
+.global-note {
+  margin: 16px 0 0;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.help-list {
+  display: grid;
+  gap: 14px;
+}
+
+.help-list section {
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.help-list section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.help-list h3 {
+  margin: 0 0 5px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.help-list p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.help-list p + p {
+  margin-top: 6px;
+}
+
+.help-list code {
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--text);
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .upstream-list {
   display: grid;
   gap: 12px;
@@ -219,10 +269,58 @@ main {
   border-left-color: var(--bad);
 }
 
+.upstream.dragging {
+  opacity: 0.55;
+}
+
+.upstream.drop-before {
+  box-shadow: inset 0 3px 0 var(--accent);
+}
+
+.upstream.drop-after {
+  box-shadow: inset 0 -3px 0 var(--accent);
+}
+
 .upstream-head {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.drag-handle {
+  display: grid;
+  grid-template-columns: repeat(3, 4px);
+  gap: 3px;
+  flex-shrink: 0;
+  align-items: center;
+  width: 30px;
+  min-height: 48px;
+  margin-left: 12px;
+  border: 0;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.drag-handle span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.drag-handle:hover span,
+.drag-handle:focus-visible span {
+  background: var(--accent);
+}
+
+.drag-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -4px;
 }
 
 .upstream-toggle {
@@ -338,6 +436,16 @@ main {
 .upstream-body {
   padding: 4px 18px 18px;
   border-top: 1px solid var(--line);
+}
+
+.option-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
 }
 
 .enable-toggle {
@@ -495,6 +603,86 @@ main {
   color: #ffffff;
 }
 
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.help-overlay[hidden] {
+  display: none;
+}
+
+.help-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.help-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.help-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.save-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(560px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  transform: translateX(-50%);
+}
+
+.save-bar[hidden] {
+  display: none;
+}
+
+.save-bar span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.save-bar .button {
+  min-height: 34px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+
+.save-bar-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* 页面内自绘确认对话框（sandbox iframe 无 allow-modals，原生 confirm 不可用） */
 .confirm-overlay {
   position: fixed;
@@ -567,7 +755,12 @@ main {
 @media (max-width: 720px) {
   .topbar {
     align-items: flex-start;
+    flex-direction: column;
     padding: 22px 18px 18px;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
   }
 
   main {
@@ -604,5 +797,14 @@ main {
   .health {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .save-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .save-bar-actions {
+    justify-content: flex-end;
   }
 }

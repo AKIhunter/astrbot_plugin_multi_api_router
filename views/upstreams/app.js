@@ -4,12 +4,16 @@ const list = document.querySelector("#upstream-list");
 const template = document.querySelector("#upstream-template");
 const globalFields = document.querySelector("#global-fields");
 const toastElement = document.querySelector("#toast");
+const saveBar = document.querySelector("#save-bar");
+const helpOverlay = document.querySelector("#help-overlay");
 let state = { upstreams: [], global: {}, strategy: {} };
 let dirty = false;
 let pendingDelete = new Set();
 // 页面只展示「已启用 / 配置完整 / 本次新加」的上游，隐藏历史遗留的空槽位。
 const addedSlots = new Set();
 const expanded = new Set();
+let draggingSlot = null;
+let lastOperationSnapshot = null;
 const MAX_UPSTREAMS = 20;
 
 // 页面只保留需要经常改的策略项；超时、并发、预算等仍在 AstrBot 插件配置里。
@@ -45,14 +49,107 @@ function healthClass(health) {
   return health.ok ? "healthy" : "failed";
 }
 
+function visibleUpstreams() {
+  return state.upstreams
+    .filter((item) => item.enabled || item.configured || addedSlots.has(item.slot))
+    .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.slot - b.slot);
+}
+
+function nextPriority() {
+  const visible = visibleUpstreams();
+  if (visible.length === 0) return 10;
+  return Math.max(...visible.map((item) => Number(item.priority) || 0)) + 10;
+}
+
+function cleanupDropStyles() {
+  list.querySelectorAll(".upstream").forEach((item) => {
+    item.classList.remove("dragging", "drop-before", "drop-after");
+  });
+}
+
+function applyOrderFromSlots(orderedSlots) {
+  const priorityBySlot = new Map(
+    orderedSlots.map((slot, index) => [Number(slot), (index + 1) * 10]),
+  );
+  // 拖拽顺序是新的优先级来源；保存时后端仍读取 priority 字段。
+  state.upstreams.forEach((item) => {
+    if (priorityBySlot.has(Number(item.slot))) {
+      item.priority = priorityBySlot.get(Number(item.slot));
+    }
+  });
+}
+
+function cloneValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function syncStateFromForm() {
+  const global = { ...state.global };
+  globalFields.querySelectorAll("[data-global-key]").forEach((input) => {
+    global[input.dataset.globalKey] =
+      input.type === "checkbox" ? input.checked : input.value;
+  });
+  state.global = global;
+
+  const articles = Array.from(list.querySelectorAll(".upstream"));
+  articles.forEach((article, index) => {
+    const slot = Number(article.dataset.slot);
+    const item = state.upstreams.find((upstream) => Number(upstream.slot) === slot);
+    if (!item) return;
+    item.enabled = article.querySelector(".enabled").checked;
+    item.name = article.querySelector(".name").value.trim();
+    item.api_base = article.querySelector(".api-base").value.trim();
+    item.api_key = article.querySelector(".api-key").value.trim();
+    item.model = article.querySelector(".model").value.trim();
+    item.priority = (index + 1) * 10;
+    item.supports_tools = article.querySelector(".tools").checked;
+    item.enable_thinking = article.querySelector(".thinking").checked;
+    item.configured = Boolean(item.api_base && item.api_key && item.model);
+  });
+}
+
+function captureOperationSnapshot() {
+  syncStateFromForm();
+  lastOperationSnapshot = {
+    state: cloneValue(state),
+    pendingDelete: Array.from(pendingDelete),
+    addedSlots: Array.from(addedSlots),
+    expanded: Array.from(expanded),
+    dirty,
+  };
+}
+
+function undoLastOperation() {
+  if (!lastOperationSnapshot) {
+    saveBar.hidden = true;
+    return;
+  }
+  const snapshot = lastOperationSnapshot;
+  state = cloneValue(snapshot.state);
+  pendingDelete = new Set(snapshot.pendingDelete);
+  addedSlots.clear();
+  snapshot.addedSlots.forEach((slot) => addedSlots.add(slot));
+  expanded.clear();
+  snapshot.expanded.forEach((slot) => expanded.add(slot));
+  dirty = snapshot.dirty;
+  document.querySelector("#save-button").classList.toggle("dirty", dirty);
+  renderGlobalFields();
+  render();
+  saveBar.hidden = true;
+  lastOperationSnapshot = null;
+  showToast("已撤销上一步操作");
+}
+
 function markDirty() {
   dirty = true;
   document.querySelector("#save-button").classList.add("dirty");
+  saveBar.hidden = false;
 }
 
 function clearDirty() {
   dirty = false;
   document.querySelector("#save-button").classList.remove("dirty");
+  saveBar.hidden = true;
 }
 
 function renderGlobalFields() {
@@ -108,16 +205,8 @@ function updateSummary() {
 
 function render() {
   list.replaceChildren();
-  // 隐藏既未启用、也没填完整的空槽位，避免历史备份槽位把页面拉得很长；
-  // 本次点击「新增 API」的槽位始终显示，方便填写。
-  const visible = state.upstreams.filter(
-    (item) => item.enabled || item.configured || addedSlots.has(item.slot),
-  );
-  // 数值越小越优先；页面顺序与真实调用顺序一致。
-  const ordered = [...visible].sort(
-    (a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.slot - b.slot,
-  );
-  for (const upstream of ordered) {
+  const ordered = visibleUpstreams();
+  for (const [index, upstream] of ordered.entries()) {
     const fragment = template.content.cloneNode(true);
     const article = fragment.querySelector(".upstream");
     const health = upstream.health;
@@ -128,7 +217,8 @@ function render() {
 
     // 折叠头部摘要
     const toggle = fragment.querySelector(".upstream-toggle");
-    fragment.querySelector(".slot").textContent = `#${upstream.slot}`;
+    // 这里显示的是页面顺序编号，不是固定槽位号；拖拽后会自动从上到下重排。
+    fragment.querySelector(".slot").textContent = `#${index + 1}`;
     fragment.querySelector(".upstream-name").textContent =
       escapeText(upstream.name) || "未命名";
     const toolTag = fragment.querySelector(".tool-tag");
@@ -138,6 +228,14 @@ function render() {
       toolTag.classList.remove("on");
     }
     toolTag.textContent = upstream.supports_tools ? "工具✓" : "无工具";
+    const thinkingTag = fragment.querySelector(".thinking-tag");
+    if (upstream.enable_thinking) {
+      thinkingTag.classList.add("on");
+      thinkingTag.textContent = "思考";
+    } else {
+      thinkingTag.classList.remove("on");
+      thinkingTag.textContent = "直出";
+    }
 
     const badge = fragment.querySelector(".state-badge");
     if (!upstream.configured) {
@@ -170,11 +268,11 @@ function render() {
     // 详情区字段
     fragment.querySelector(".enabled").checked = Boolean(upstream.enabled);
     fragment.querySelector(".name").value = escapeText(upstream.name);
-    fragment.querySelector(".priority").value = upstream.priority;
     fragment.querySelector(".api-base").value = escapeText(upstream.api_base);
     fragment.querySelector(".api-key").value = escapeText(upstream.api_key || "");
     fragment.querySelector(".model").value = escapeText(upstream.model);
     fragment.querySelector(".tools").checked = Boolean(upstream.supports_tools);
+    fragment.querySelector(".thinking").checked = Boolean(upstream.enable_thinking);
     fragment.querySelector(".pinned-hint").textContent = upstream.provider_id
       ? `在 AstrBot 中选择此 Provider 可直接使用该上游：${upstream.provider_id}`
       : "";
@@ -200,6 +298,42 @@ function render() {
       checkUpstream(upstream.slot, inlineButton);
     });
 
+    const dragHandle = fragment.querySelector(".drag-handle");
+    dragHandle.addEventListener("dragstart", (event) => {
+      captureOperationSnapshot();
+      draggingSlot = Number(upstream.slot);
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(upstream.slot));
+      event.dataTransfer.setDragImage(article, 28, Math.min(article.offsetHeight / 2, 36));
+      article.classList.add("dragging");
+    });
+    dragHandle.addEventListener("dragend", () => {
+      draggingSlot = null;
+      cleanupDropStyles();
+    });
+    article.addEventListener("dragover", (event) => {
+      if (!draggingSlot || Number(upstream.slot) === draggingSlot) return;
+      event.preventDefault();
+      const after = event.offsetY > article.offsetHeight / 2;
+      cleanupDropStyles();
+      article.classList.add(after ? "drop-after" : "drop-before");
+    });
+    article.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const sourceSlot = draggingSlot || Number(event.dataTransfer.getData("text/plain"));
+      const targetSlot = Number(upstream.slot);
+      if (!sourceSlot || sourceSlot === targetSlot) return;
+      const after = event.offsetY > article.offsetHeight / 2;
+      const slots = ordered.map((item) => Number(item.slot)).filter((slot) => slot !== sourceSlot);
+      const targetIndex = slots.indexOf(targetSlot);
+      slots.splice(targetIndex + (after ? 1 : 0), 0, sourceSlot);
+      applyOrderFromSlots(slots);
+      cleanupDropStyles();
+      draggingSlot = null;
+      render();
+      markDirty();
+    });
+
     // 展开/收起
     const body = fragment.querySelector(".upstream-body");
     const applyExpand = () => {
@@ -218,8 +352,7 @@ function render() {
 
     // 编辑输入即标记未保存（详情区里的输入，含折叠态）
     article.querySelectorAll("input").forEach((input) => {
-      input.addEventListener("input", markDirty);
-      input.addEventListener("change", markDirty);
+      input.addEventListener(input.type === "checkbox" ? "change" : "input", markDirty);
     });
 
     list.appendChild(fragment);
@@ -232,6 +365,7 @@ async function load() {
     state = await bridge.apiGet("upstreams/config");
     pendingDelete.clear();
     addedSlots.clear();
+    lastOperationSnapshot = null;
     renderGlobalFields();
     render();
     clearDirty();
@@ -270,6 +404,11 @@ function addUpstream() {
     (item) => !item.enabled && !item.configured && !addedSlots.has(item.slot),
   );
   if (reusable) {
+    captureOperationSnapshot();
+    reusable.enabled = true;
+    reusable.supports_tools = true;
+    reusable.enable_thinking = false;
+    reusable.priority = nextPriority();
     addedSlots.add(reusable.slot);
     expanded.add(String(reusable.slot));
     render();
@@ -288,17 +427,19 @@ function addUpstream() {
     showToast(`最多支持 ${MAX_UPSTREAMS} 个上游`, true);
     return;
   }
+  captureOperationSnapshot();
   state.upstreams.push({
     slot: nextSlot,
-    enabled: false,
+    enabled: true,
     configured: false,
     name: "",
     api_base: "",
     api_key: "",
     model: "",
-    priority: nextSlot * 10,
+    priority: nextPriority(),
     // 新上游默认勾选「支持工具调用」。
     supports_tools: true,
+    enable_thinking: false,
     health: null,
     provider_id: "",
   });
@@ -316,6 +457,7 @@ function deleteUpstream(slot) {
   confirmDialog(`确定删除上游「${label}」吗？此操作需点击「保存全部」后生效。`).then(
     (ok) => {
       if (!ok) return;
+      captureOperationSnapshot();
       state.upstreams.splice(index, 1);
       expanded.delete(String(slot));
       addedSlots.delete(slot);
@@ -367,16 +509,20 @@ function collectPayload() {
     global[key] = input.type === "checkbox" ? input.checked : input.value;
   });
   payload.global = global;
+  const visibleArticles = Array.from(list.querySelectorAll(".upstream"));
   list.querySelectorAll(".upstream").forEach((article) => {
     const slot = article.dataset.slot;
+    const order = visibleArticles.indexOf(article);
     payload[`upstream_${slot}`] = {
       enabled: article.querySelector(".enabled").checked,
       name: article.querySelector(".name").value.trim(),
       api_base: article.querySelector(".api-base").value.trim(),
       api_key: article.querySelector(".api-key").value.trim(),
       model: article.querySelector(".model").value.trim(),
-      priority: article.querySelector(".priority").value,
+      // 页面不再暴露数字优先级，按可见列表拖拽顺序自动写入。
+      priority: (order + 1) * 10,
       supports_tools: article.querySelector(".tools").checked,
+      enable_thinking: article.querySelector(".thinking").checked,
     };
   });
   if (pendingDelete.size > 0) {
@@ -387,6 +533,7 @@ function collectPayload() {
 
 async function save() {
   const button = document.querySelector("#save-button");
+  const bottomButton = document.querySelector("#save-bottom-button");
   const payload = collectPayload();
   // 保存前前端完整性校验：启用但配置不完整时直接拦截，给友好提示。
   for (const key of Object.keys(payload)) {
@@ -399,7 +546,9 @@ async function save() {
     }
   }
   button.disabled = true;
+  bottomButton.disabled = true;
   button.textContent = "保存中…";
+  bottomButton.textContent = "保存中…";
   try {
     const response = await bridge.apiPost("upstreams/save", payload);
     showToast(
@@ -413,11 +562,64 @@ async function save() {
     showToast(error.message || "保存失败", true);
   } finally {
     button.disabled = false;
+    bottomButton.disabled = false;
     button.textContent = "保存全部";
+    bottomButton.textContent = "保存并生效";
   }
 }
 
 document.querySelector("#refresh-button").addEventListener("click", load);
 document.querySelector("#save-button").addEventListener("click", save);
+document.querySelector("#save-bottom-button").addEventListener("click", save);
+document.querySelector("#cancel-save-button").addEventListener("click", undoLastOperation);
 document.querySelector("#add-upstream").addEventListener("click", addUpstream);
+document.querySelector("#help-button").addEventListener("click", () => {
+  helpOverlay.hidden = false;
+  document.querySelector("#help-close").focus();
+});
+document.querySelector("#help-close").addEventListener("click", () => {
+  helpOverlay.hidden = true;
+  document.querySelector("#help-button").focus();
+});
+helpOverlay.addEventListener("click", (event) => {
+  if (event.target === helpOverlay) {
+    helpOverlay.hidden = true;
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !helpOverlay.hidden) {
+    helpOverlay.hidden = true;
+    document.querySelector("#help-button").focus();
+  }
+});
+
+function editorInputFromTarget(target) {
+  if (!(target instanceof Element)) return null;
+  const direct = target.closest("input[data-global-key], .upstream input");
+  if (direct) return direct;
+  const label = target.closest("label");
+  return label?.querySelector("input[data-global-key], .upstream input") || null;
+}
+
+// 在控件真正改变前记录快照；鼠标和键盘切换输入框都覆盖。
+document.addEventListener("pointerdown", (event) => {
+  const editor = editorInputFromTarget(event.target);
+  if (editor) {
+    captureOperationSnapshot();
+    return;
+  }
+  if (
+    !saveBar.hidden
+    && !saveBar.contains(event.target)
+    && event.target instanceof Element
+    && !event.target.closest("button, .upstream, .help-dialog")
+  ) {
+    undoLastOperation();
+  }
+});
+document.addEventListener("focusin", (event) => {
+  if (editorInputFromTarget(event.target)) {
+    captureOperationSnapshot();
+  }
+});
 load();

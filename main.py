@@ -208,6 +208,25 @@ class MultiApiRouterProvider(Provider):
             parsed = default
         return max(minimum, min(maximum, parsed))
 
+    @staticmethod
+    def _enable_thinking_value(raw: dict, extra_body: dict | None = None) -> bool:
+        """兼容旧配置：优先读显式开关，其次读取 extra_body.enable_thinking。"""
+        if not isinstance(raw, dict):
+            return False
+        if "enable_thinking" in raw:
+            return bool(raw.get("enable_thinking", False))
+        body = extra_body
+        if body is None:
+            body = raw.get("extra_body")
+            if isinstance(body, str) and body.strip():
+                try:
+                    body = json.loads(body)
+                except (ValueError, TypeError):
+                    body = {}
+        if isinstance(body, dict) and "enable_thinking" in body:
+            return bool(body.get("enable_thinking", False))
+        return False
+
     def _build_upstreams(self, plugin_config: dict) -> list[UpstreamState]:
         timeout = self._bounded_int(
             plugin_config.get("request_timeout_seconds"), 45, 5, 600
@@ -245,6 +264,8 @@ class MultiApiRouterProvider(Provider):
                     extra_body = {}
             if not isinstance(extra_body, dict):
                 extra_body = {}
+            # 思考开关给常见推理模型使用；旧的 extra_body 会继续保留，其它参数不受影响。
+            extra_body["enable_thinking"] = self._enable_thinking_value(raw, extra_body)
             client = ProviderOpenAIOfficial(
                 {
                     "id": f"{self.meta().id}:{index}",
@@ -639,7 +660,7 @@ class MultiApiRouterProvider(Provider):
     PLUGIN_NAME,
     "AKIhunter",
     "多个 OpenAI 兼容 API 的优先级路由、熔断与自动降级 Provider",
-    "1.3.0",
+    "1.3.1",
 )
 class MultiApiRouterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1206,6 +1227,7 @@ class MultiApiRouterPlugin(Star):
                 raw.get("priority"), slot * 10, -10000, 10000
             ) if self.router else slot * 10,
             "supports_tools": bool(raw.get("supports_tools", True)),
+            "enable_thinking": MultiApiRouterProvider._enable_thinking_value(raw),
             "checking": slot in self._health_inflight,
             "provider_id": self._pinned_provider_id(slot),
             "health": self._health_results.get(slot),
@@ -1406,6 +1428,7 @@ class MultiApiRouterPlugin(Star):
             "model": model,
             "priority": int(raw.get("priority", slot * 10)),
             "supports_tools": bool(raw.get("supports_tools", True)),
+            "enable_thinking": MultiApiRouterProvider._enable_thinking_value(raw),
             "provider_id": self._pinned_provider_id(slot),
             "health": self._health_results.get(slot),
         }
@@ -1513,7 +1536,7 @@ class MultiApiRouterPlugin(Star):
             raise ValueError(f"上游 {slot} 必须是对象")
         allowed = {
             "enabled", "name", "api_base", "api_key", "model",
-            "priority", "supports_tools", "extra_body",
+            "priority", "supports_tools", "enable_thinking", "extra_body",
         }
         unknown = set(raw) - allowed
         if unknown:
@@ -1526,6 +1549,13 @@ class MultiApiRouterPlugin(Star):
         priority = self._bounded_priority(raw.get("priority"), slot * 10)
         # 默认开启工具调用；只有用户明确取消时才保存为 False。
         supports_tools = bool(raw.get("supports_tools", True))
+        if "enable_thinking" in raw:
+            enable_thinking = bool(raw.get("enable_thinking", False))
+        else:
+            existing = self.config.get(f"upstream_{slot}")
+            enable_thinking = MultiApiRouterProvider._enable_thinking_value(
+                existing if isinstance(existing, dict) else {}
+            )
         if enabled and (not api_base or not api_key or not model):
             raise ValueError(f"上游 {slot} 已启用但缺少 API Base / API Key / 模型 ID")
         # 保留 extra_body：前端表单不展示该字段，这里若前端未提交则沿用已有配置，
@@ -1543,6 +1573,7 @@ class MultiApiRouterPlugin(Star):
             "model": model,
             "priority": priority,
             "supports_tools": supports_tools,
+            "enable_thinking": enable_thinking,
         }
         if extra_body is not None:
             result["extra_body"] = extra_body
