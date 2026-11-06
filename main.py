@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import inspect
 import json
 import os
 import time
+import wave
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,29 @@ PROVIDER_TYPE = "multi_api_router"
 PINNED_PROVIDER_PREFIX = f"{PROVIDER_TYPE}:upstream_"
 MAX_UPSTREAMS = 20
 MIN_UPSTREAMS = 5
+DEFAULT_MAX_INPUT_CHARS = 256 * 1024
+API_TYPE_LABELS = {
+    "chat": "聊天",
+    "image_generation": "文/图生图",
+    "image_to_text": "图转文",
+    "embedding": "Embedding",
+    "rerank": "Rerank",
+    "stt": "STT",
+    "tts": "TTS",
+    "asr": "ASR",
+    "multimodal": "多模态",
+}
+# AstrBot 的聊天 Provider 只能调用 Chat Completions 协议。视觉理解仍属于
+# Chat Completions；生图、向量、排序与语音 API 只做对应协议的健康检测。
+CHAT_COMPATIBLE_API_TYPES = {"chat", "image_to_text", "multimodal"}
+# 自动健康检测避免每小时触发生图或语音生成等高成本请求；这些类型仍可手动检测。
+AUTO_HEALTH_CHECK_API_TYPES = {
+    "chat",
+    "image_to_text",
+    "embedding",
+    "rerank",
+    "multimodal",
+}
 AUTO_BIND_TARGETS = {
     "astrbot_plugin_bilibili_ai_bot": {
         "config_flag": "auto_bind_bilibili",
@@ -58,6 +83,8 @@ class UpstreamState:
     supports_tools: bool
     client: ProviderOpenAIOfficial
     slot: int = 0
+    api_type: str = "chat"
+    route_enabled: bool = False
     consecutive_failures: int = 0
     circuit_open_until: float = 0.0
     calls: int = 0
@@ -145,8 +172,14 @@ class MultiApiRouterProvider(Provider):
         self.max_attempts = self._bounded_int(
             plugin_config.get("max_attempts"), 3, 1, 5
         )
+        self.route_timeout_seconds = self._bounded_int(
+            plugin_config.get("route_timeout_seconds"), 90, 5, 600
+        )
         self.max_input_chars = self._bounded_int(
-            plugin_config.get("max_input_chars"), 48000, 1000, 2_000_000
+            plugin_config.get("max_input_chars"),
+            DEFAULT_MAX_INPUT_CHARS,
+            1000,
+            2_000_000,
         )
         self.max_output_tokens = self._bounded_int(
             plugin_config.get("max_output_tokens"), 2048, 1, 131072
@@ -165,14 +198,18 @@ class MultiApiRouterProvider(Provider):
         )
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._state_lock = asyncio.Lock()
-        self._all_upstreams = self._build_upstreams(plugin_config)
+        self._all_upstreams = self._build_upstreams(
+            plugin_config,
+            only_slot=self.pinned_slot,
+        )
         # 指定上游模式只保留目标上游，绝不自动分配到其它上游。
         if self.pinned_slot:
-            self.upstreams = [
-                item for item in self._all_upstreams if item.slot == self.pinned_slot
-            ]
-        else:
             self.upstreams = self._all_upstreams
+        else:
+            # “启用路由”只控制是否进入自动候选链；关闭后仍保留指定 Provider。
+            self.upstreams = [
+                item for item in self._all_upstreams if item.route_enabled
+            ]
 
     @staticmethod
     def _detect_pinned_slot(provider_config: dict) -> int:
@@ -241,10 +278,20 @@ class MultiApiRouterProvider(Provider):
         return False
 
     @staticmethod
-    def _upstream_enabled(raw: dict) -> bool:
-        """空槽位默认禁用；配置完整且未显式设置时默认启用。"""
+    def _api_type(raw: dict) -> str:
+        """旧配置没有 api_type 时按聊天 API 兼容。"""
+        if not isinstance(raw, dict):
+            return "chat"
+        api_type = str(raw.get("api_type") or "chat").strip().lower()
+        return api_type if api_type in API_TYPE_LABELS else "chat"
+
+    @staticmethod
+    def _route_enabled(raw: dict) -> bool:
+        """兼容旧 enabled 字段；配置完整且无显式开关时默认参与路由。"""
         if not isinstance(raw, dict):
             return False
+        if "route_enabled" in raw:
+            return bool(raw.get("route_enabled"))
         if "enabled" in raw:
             return bool(raw.get("enabled"))
         return bool(
@@ -253,24 +300,47 @@ class MultiApiRouterProvider(Provider):
             and str(raw.get("model") or "").strip()
         )
 
-    def _build_upstreams(self, plugin_config: dict) -> list[UpstreamState]:
+    @staticmethod
+    def _upstream_enabled(raw: dict) -> bool:
+        """保留旧内部调用名，语义等同“启用路由”."""
+        return MultiApiRouterProvider._route_enabled(raw)
+
+    @staticmethod
+    def _chat_route_enabled(raw: dict) -> bool:
+        return (
+            MultiApiRouterProvider._route_enabled(raw)
+            and MultiApiRouterProvider._api_type(raw)
+            in CHAT_COMPATIBLE_API_TYPES
+        )
+
+    def _build_upstreams(
+        self,
+        plugin_config: dict,
+        *,
+        only_slot: int = 0,
+    ) -> list[UpstreamState]:
         timeout = self._bounded_int(
             plugin_config.get("request_timeout_seconds"), 45, 5, 600
         )
         upstreams: list[UpstreamState] = []
         for index in range(1, MAX_UPSTREAMS + 1):
+            if only_slot and index != only_slot:
+                continue
             raw = plugin_config.get(f"upstream_{index}") or {}
-            # 整体模式和指定上游列表都只包含启用项；禁用项不会参与排序或调用。
-            if not isinstance(raw, dict) or not self._upstream_enabled(raw):
+            if not isinstance(raw, dict):
+                continue
+            api_type = self._api_type(raw)
+            if api_type not in CHAT_COMPATIBLE_API_TYPES:
                 continue
             api_base = str(raw.get("api_base") or "").strip().rstrip("/")
             api_key = str(raw.get("api_key") or "").strip()
             model = str(raw.get("model") or "").strip()
             if not api_base or not api_key or not model:
-                logger.warning(
-                    "[MultiApiRouter] 上游 %s 已启用但配置不完整，已跳过。",
-                    index,
-                )
+                if self._route_enabled(raw):
+                    logger.warning(
+                        "[MultiApiRouter] 上游 %s 已启用路由但配置不完整，已跳过。",
+                        index,
+                    )
                 continue
             name = str(raw.get("name") or f"upstream-{index}").strip()
             priority = self._bounded_int(raw.get("priority"), index * 10, -10000, 10000)
@@ -316,6 +386,8 @@ class MultiApiRouterProvider(Provider):
                     supports_tools=bool(raw.get("supports_tools", True)),
                     client=client,
                     slot=index,
+                    api_type=api_type,
+                    route_enabled=self._route_enabled(raw),
                 )
             )
         return sorted(upstreams, key=lambda item: item.priority)
@@ -402,7 +474,12 @@ class MultiApiRouterProvider(Provider):
         只有最近一次检测明确失败、且在有效期内才跳过；调用失败只会累计
         连续失败并暂停（熔断），等冷却结束或下次检测恢复。
         """
-        if not self.skip_unhealthy or not callable(self.health_lookup):
+        # 固定选择某个 API 时必须真实调用目标，不能被自动路由的健康跳过策略拦截。
+        if (
+            self.pinned_slot
+            or not self.skip_unhealthy
+            or not callable(self.health_lookup)
+        ):
             return ""
         try:
             result = self.health_lookup(upstream.slot)
@@ -565,6 +642,13 @@ class MultiApiRouterProvider(Provider):
         errors: list[str] = []
         health_skipped: list[str] = []
         attempts = 0
+        route_timed_out = False
+        # 总路由时限只约束自动路由；指定上游继续使用单上游请求超时。
+        deadline = (
+            None
+            if self.pinned_slot
+            else time.monotonic() + self.route_timeout_seconds
+        )
         # 带工具请求：只考虑声明支持工具的上游；一个都没有时明确报错，
         # 绝不静默丢掉工具、假装执行成功。
         needs_tools = bool(func_tool and not func_tool.empty())
@@ -576,9 +660,34 @@ class MultiApiRouterProvider(Provider):
                     "已按原样失败，未执行任何工具调用。请在上游列表中勾选"
                     "「支持工具调用」，或改用支持工具的主模型。"
                 )
-        async with self._semaphore:
+        acquired = False
+        try:
+            if deadline is None:
+                await self._semaphore.acquire()
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    route_timed_out = True
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            self._semaphore.acquire(),
+                            timeout=remaining,
+                        )
+                    except TimeoutError:
+                        route_timed_out = True
+            acquired = not route_timed_out
+
             for upstream in candidates:
-                if attempts >= self.max_attempts:
+                if route_timed_out or attempts >= self.max_attempts:
+                    break
+                remaining = (
+                    deadline - time.monotonic()
+                    if deadline is not None
+                    else None
+                )
+                if remaining is not None and remaining <= 0:
+                    route_timed_out = True
                     break
                 if not upstream.available(time.monotonic()):
                     continue
@@ -596,7 +705,7 @@ class MultiApiRouterProvider(Provider):
                 attempts += 1
                 started = time.monotonic()
                 try:
-                    response = await self._call_once(
+                    call = self._call_once(
                         upstream,
                         prompt=prompt,
                         image_urls=image_urls,
@@ -609,6 +718,11 @@ class MultiApiRouterProvider(Provider):
                         tool_choice=tool_choice,
                         kwargs=kwargs,
                     )
+                    response = (
+                        await asyncio.wait_for(call, timeout=remaining)
+                        if remaining is not None
+                        else await call
+                    )
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_success(upstream, latency_ms)
                     return response
@@ -616,22 +730,56 @@ class MultiApiRouterProvider(Provider):
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_failure(upstream, exc, latency_ms)
                     errors.append(f"{upstream.name}: {self._safe_error(exc)}")
+                    if (
+                        deadline is not None
+                        and time.monotonic() >= deadline - 0.01
+                    ):
+                        route_timed_out = True
+                        break
+        finally:
+            if acquired:
+                self._semaphore.release()
 
         # 只有真实调用失败（attempts > 0）才回退主模型；健康检查跳过不算。
-        if attempts > 0:
+        if attempts > 0 and not route_timed_out:
             try:
-                fallback_response = await self._call_fallback(
-                    prompt=prompt,
-                    image_urls=image_urls,
-                    audio_urls=audio_urls,
-                    func_tool=func_tool,
-                    contexts=contexts,
-                    system_prompt=system_prompt,
-                    tool_calls_result=tool_calls_result,
-                    extra_user_content_parts=extra_user_content_parts,
-                    tool_choice=tool_choice,
-                    kwargs=kwargs,
-                )
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        route_timed_out = True
+                        fallback_response = None
+                    else:
+                        fallback_response = await asyncio.wait_for(
+                            self._call_fallback(
+                                prompt=prompt,
+                                image_urls=image_urls,
+                                audio_urls=audio_urls,
+                                func_tool=func_tool,
+                                contexts=contexts,
+                                system_prompt=system_prompt,
+                                tool_calls_result=tool_calls_result,
+                                extra_user_content_parts=extra_user_content_parts,
+                                tool_choice=tool_choice,
+                                kwargs=kwargs,
+                            ),
+                            timeout=remaining,
+                        )
+                else:
+                    fallback_response = await self._call_fallback(
+                        prompt=prompt,
+                        image_urls=image_urls,
+                        audio_urls=audio_urls,
+                        func_tool=func_tool,
+                        contexts=contexts,
+                        system_prompt=system_prompt,
+                        tool_calls_result=tool_calls_result,
+                        extra_user_content_parts=extra_user_content_parts,
+                        tool_choice=tool_choice,
+                        kwargs=kwargs,
+                    )
+            except TimeoutError:
+                route_timed_out = True
+                fallback_response = None
             except Exception as exc:
                 logger.warning(
                     "[MultiApiRouter] 主模型回退也失败：%s。",
@@ -641,6 +789,11 @@ class MultiApiRouterProvider(Provider):
             if fallback_response is not None:
                 return fallback_response
 
+        if route_timed_out:
+            raise RuntimeError(
+                f"多 API 路由超过总时限 {self.route_timeout_seconds} 秒，"
+                f"已停止后续调用；已尝试 {attempts} 个上游。"
+            )
         if attempts == 0:
             detail = "；".join(health_skipped) or "无可用上游"
             raise RuntimeError(f"没有可调用的上游：{detail}。")
@@ -664,6 +817,7 @@ class MultiApiRouterProvider(Provider):
             f"模式: {mode}",
             (
                 f"上游: {len(self.upstreams)}，每次最多尝试 {self.max_attempts} 个，"
+                f"总路由超时 {self.route_timeout_seconds}s，"
                 f"输出上限 {self.max_output_tokens} tokens"
             ),
         ]
@@ -762,7 +916,7 @@ class MultiApiRouterPlugin(Star):
         return entry
 
     async def _close_router_instance(self, inst: "MultiApiRouterProvider") -> None:
-        for upstream in getattr(inst, "upstreams", []):
+        for upstream in getattr(inst, "_all_upstreams", []):
             try:
                 await upstream.client.client.close()
             except Exception:
@@ -850,8 +1004,9 @@ class MultiApiRouterPlugin(Star):
             )
         ]
 
-        # 为每个已配置上游注册一个可直接在 AstrBot 中选择的 Provider。
-        for upstream in router.upstreams:
+        # 所有配置完整的聊天兼容 API 都注册直连 Provider；“启用路由”只影响
+        # 整体自动候选链，不影响调用方固定选择某个 API。
+        for upstream in router._all_upstreams:
             pinned_id = self._pinned_provider_id(upstream.slot)
             pinned_config = dict(self.config)
             pinned_config["provider_id"] = pinned_id
@@ -945,6 +1100,8 @@ class MultiApiRouterPlugin(Star):
         for slot in self._render_slots():
             raw = self.config.get(f"upstream_{slot}") or {}
             if not isinstance(raw, dict):
+                continue
+            if MultiApiRouterProvider._api_type(raw) not in AUTO_HEALTH_CHECK_API_TYPES:
                 continue
             if not (
                 str(raw.get("api_base") or "").strip()
@@ -1268,12 +1425,22 @@ class MultiApiRouterPlugin(Star):
         )
         return {
             "slot": slot,
-            "enabled": MultiApiRouterProvider._upstream_enabled(raw),
+            "route_enabled": MultiApiRouterProvider._chat_route_enabled(raw),
+            # 兼容旧页面/API 客户端，enabled 与 route_enabled 保持同值。
+            "enabled": MultiApiRouterProvider._chat_route_enabled(raw),
             "configured": configured,
             "name": str(raw.get("name") or f"Upstream {slot}"),
             "api_base": api_base,
             "host": host,
             "model": str(raw.get("model") or ""),
+            "api_type": MultiApiRouterProvider._api_type(raw),
+            "api_type_label": API_TYPE_LABELS[
+                MultiApiRouterProvider._api_type(raw)
+            ],
+            "chat_compatible": (
+                MultiApiRouterProvider._api_type(raw)
+                in CHAT_COMPATIBLE_API_TYPES
+            ),
             "priority": self.router._bounded_int(
                 raw.get("priority"), slot * 10, -10000, 10000
             ) if self.router else slot * 10,
@@ -1285,6 +1452,89 @@ class MultiApiRouterPlugin(Star):
             "health": self._health_results.get(slot),
         }
 
+    @staticmethod
+    def _health_check_audio() -> bytes:
+        """生成短静音 WAV，避免健康检查依赖外部样本文件。"""
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16000)
+            audio.writeframes(b"\x00\x00" * 1600)
+        return buffer.getvalue()
+
+    async def _execute_typed_probe(
+        self,
+        client: AsyncOpenAI,
+        *,
+        api_type: str,
+        model: str,
+    ) -> tuple[bool, str]:
+        """按 API 分类调用对应协议，防止把非聊天接口伪装成 Chat Completions。"""
+        if api_type in {"chat", "image_to_text", "multimodal"}:
+            protocol = "Chat Completions"
+            if api_type in {"image_to_text", "multimodal"}:
+                # 健康检查只验证端点与模型可用性。部分兼容服务拒绝 data URL，
+                # 用内嵌图片会把可用的视觉模型误判为故障。
+                protocol = f"Chat Completions（{API_TYPE_LABELS[api_type]}）"
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with exactly OK."}],
+                max_tokens=8,
+                temperature=0,
+            )
+            text = ""
+            if response.choices:
+                text = str(response.choices[0].message.content or "").strip()
+            return bool(text), protocol
+
+        if api_type == "image_generation":
+            response = await client.images.generate(
+                model=model,
+                prompt="A plain white square on a white background.",
+                n=1,
+                size="256x256",
+            )
+            return bool(response.data), "Images Generations（手动检测可能计费）"
+
+        if api_type == "embedding":
+            response = await client.embeddings.create(
+                model=model,
+                input="health check",
+            )
+            valid = bool(response.data and response.data[0].embedding)
+            return valid, "Embeddings"
+
+        if api_type == "rerank":
+            response = await client.post(
+                "/rerank",
+                cast_to=dict,
+                body={
+                    "model": model,
+                    "query": "health",
+                    "documents": ["health", "other"],
+                    "top_n": 1,
+                },
+            )
+            return bool(response), "Rerank"
+
+        if api_type in {"stt", "asr"}:
+            await client.audio.transcriptions.create(
+                model=model,
+                file=("health.wav", self._health_check_audio(), "audio/wav"),
+            )
+            return True, "Audio Transcriptions"
+
+        if api_type == "tts":
+            response = await client.audio.speech.create(
+                model=model,
+                voice="alloy",
+                input="OK",
+            )
+            return bool(response), "Audio Speech（手动检测可能计费）"
+
+        raise ValueError(f"不支持的 API 类型: {api_type}")
+
     async def _probe_upstream(self, slot: int) -> dict:
         raw = self.config.get(f"upstream_{slot}") or {}
         if not isinstance(raw, dict):
@@ -1293,6 +1543,7 @@ class MultiApiRouterPlugin(Star):
         api_base = str(raw.get("api_base") or "").strip().rstrip("/")
         api_key = str(raw.get("api_key") or "").strip()
         model = str(raw.get("model") or "").strip()
+        api_type = MultiApiRouterProvider._api_type(raw)
         if not api_base or not api_key or not model:
             return {
                 "ok": False,
@@ -1301,6 +1552,8 @@ class MultiApiRouterPlugin(Star):
                 "status": "配置不完整",
                 "http_status": None,
                 "error_type": "ConfigurationError",
+                "api_type": api_type,
+                "protocol": "",
             }
 
         timeout = MultiApiRouterProvider._bounded_int(
@@ -1314,25 +1567,16 @@ class MultiApiRouterPlugin(Star):
             max_retries=0,
         )
         try:
-            response = await asyncio.wait_for(
-                client.chat.completions.create(
+            has_response, protocol = await asyncio.wait_for(
+                self._execute_typed_probe(
+                    client,
+                    api_type=api_type,
                     model=model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": "Reply with exactly OK.",
-                        }
-                    ],
-                    max_tokens=8,
-                    temperature=0,
                 ),
                 timeout=timeout + 1,
             )
-            text = ""
-            if response.choices:
-                text = str(response.choices[0].message.content or "").strip()
             latency_ms = int((time.monotonic() - started) * 1000)
-            if not text:
+            if not has_response:
                 return {
                     "ok": False,
                     "checked_at": int(time.time()),
@@ -1340,6 +1584,8 @@ class MultiApiRouterPlugin(Star):
                     "status": "响应为空",
                     "http_status": 200,
                     "error_type": "EmptyResponse",
+                    "api_type": api_type,
+                    "protocol": protocol,
                 }
             logger.info(
                 "[MultiApiRouter] 上游检测成功：%s，%dms。",
@@ -1353,6 +1599,8 @@ class MultiApiRouterPlugin(Star):
                 "status": "正常",
                 "http_status": 200,
                 "error_type": None,
+                "api_type": api_type,
+                "protocol": protocol,
             }
         except Exception as exc:
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -1386,6 +1634,8 @@ class MultiApiRouterPlugin(Star):
                 "status": status,
                 "http_status": status_code,
                 "error_type": error_type,
+                "api_type": api_type,
+                "protocol": API_TYPE_LABELS[api_type],
             }
         finally:
             await client.close()
@@ -1412,12 +1662,14 @@ class MultiApiRouterPlugin(Star):
         return {
             "mode": "overall",
             "summary": (
-                f"整体自动分配：按优先级依次尝试，单次最多 {router.max_attempts} 个；"
+                f"整体自动分配：按顺序依次尝试，首个响应即停止，"
+                f"单次最多 {router.max_attempts} 个、总时限 {router.route_timeout_seconds}s；"
                 f"连续失败 {router.failure_threshold} 次暂停 {router.cooldown_seconds}s"
             ),
             "overall_provider_id": router.meta().id,
             "pinned_provider_prefix": PINNED_PROVIDER_PREFIX,
             "max_attempts": router.max_attempts,
+            "route_timeout_seconds": router.route_timeout_seconds,
             "failure_threshold": router.failure_threshold,
             "cooldown_seconds": router.cooldown_seconds,
             "skip_unhealthy_upstreams": router.skip_unhealthy,
@@ -1470,7 +1722,8 @@ class MultiApiRouterPlugin(Star):
         model = str(raw.get("model") or "").strip()
         return {
             "slot": slot,
-            "enabled": MultiApiRouterProvider._upstream_enabled(raw),
+            "route_enabled": MultiApiRouterProvider._chat_route_enabled(raw),
+            "enabled": MultiApiRouterProvider._chat_route_enabled(raw),
             # 页面需要这两个字段来判断状态与展示健康结果；
             # 之前只返回配置值，导致加载后全部显示「配置不完整 / 未检测」。
             "configured": bool(api_base and api_key and model),
@@ -1478,6 +1731,14 @@ class MultiApiRouterPlugin(Star):
             "api_base": api_base,
             "api_key": api_key,
             "model": model,
+            "api_type": MultiApiRouterProvider._api_type(raw),
+            "api_type_label": API_TYPE_LABELS[
+                MultiApiRouterProvider._api_type(raw)
+            ],
+            "chat_compatible": (
+                MultiApiRouterProvider._api_type(raw)
+                in CHAT_COMPATIBLE_API_TYPES
+            ),
             "priority": int(raw.get("priority", slot * 10)),
             "supports_tools": bool(raw.get("supports_tools", True)),
             "enable_thinking": MultiApiRouterProvider._enable_thinking_value(raw),
@@ -1494,6 +1755,9 @@ class MultiApiRouterPlugin(Star):
                 "request_timeout_seconds": self.router._bounded_int(
                     self.config.get("request_timeout_seconds"), 45, 5, 600
                 ) if self.router else int(self.config.get("request_timeout_seconds", 45)),
+                "route_timeout_seconds": self.router._bounded_int(
+                    self.config.get("route_timeout_seconds"), 90, 5, 600
+                ) if self.router else int(self.config.get("route_timeout_seconds", 90)),
                 "max_attempts": self.router._bounded_int(
                     self.config.get("max_attempts"), 3, 1, 5
                 ) if self.router else int(self.config.get("max_attempts", 3)),
@@ -1507,8 +1771,13 @@ class MultiApiRouterPlugin(Star):
                     self.config.get("max_concurrency"), 4, 1, 128
                 ) if self.router else int(self.config.get("max_concurrency", 4)),
                 "max_input_chars": self.router._bounded_int(
-                    self.config.get("max_input_chars"), 48000, 1000, 2000000
-                ) if self.router else int(self.config.get("max_input_chars", 48000)),
+                    self.config.get("max_input_chars"),
+                    DEFAULT_MAX_INPUT_CHARS,
+                    1000,
+                    2000000,
+                ) if self.router else int(
+                    self.config.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS)
+                ),
                 "max_output_tokens": self.router._bounded_int(
                     self.config.get("max_output_tokens"), 2048, 1, 131072
                 ) if self.router else int(self.config.get("max_output_tokens", 2048)),
@@ -1532,6 +1801,7 @@ class MultiApiRouterPlugin(Star):
         except Exception:
             global_fields = {key: self.config.get(key) for key in (
                 "enabled", "provider_id", "request_timeout_seconds", "max_attempts",
+                "route_timeout_seconds",
                 "failure_threshold", "cooldown_seconds", "max_concurrency",
                 "max_input_chars", "max_output_tokens", "health_check_timeout_seconds",
                 "skip_unhealthy_upstreams", "health_skip_ttl_seconds",
@@ -1564,11 +1834,12 @@ class MultiApiRouterPlugin(Star):
     # 全局数字字段范围：key -> (default, min, max)
     GLOBAL_INT_FIELDS = {
         "request_timeout_seconds": (45, 5, 600),
+        "route_timeout_seconds": (90, 5, 600),
         "max_attempts": (3, 1, 5),
         "failure_threshold": (2, 1, 100),
         "cooldown_seconds": (300, 1, 86400),
         "max_concurrency": (4, 1, 128),
-        "max_input_chars": (48000, 1000, 2000000),
+        "max_input_chars": (DEFAULT_MAX_INPUT_CHARS, 1000, 2000000),
         "max_output_tokens": (2048, 1, 131072),
         "health_check_timeout_seconds": (15, 5, 60),
         "health_skip_ttl_seconds": (21600, 60, 604800),
@@ -1588,7 +1859,8 @@ class MultiApiRouterPlugin(Star):
         if not isinstance(raw, dict):
             raise ValueError(f"上游 {slot} 必须是对象")
         allowed = {
-            "enabled", "name", "api_base", "api_key", "model",
+            "route_enabled", "enabled", "api_type",
+            "name", "api_base", "api_key", "model",
             "priority", "supports_tools", "enable_thinking", "extra_body",
         }
         unknown = set(raw) - allowed
@@ -1598,12 +1870,23 @@ class MultiApiRouterPlugin(Star):
         api_base = str(raw.get("api_base") or "").strip()[:2048]
         api_key = str(raw.get("api_key") or "").strip()[:2048]
         model = str(raw.get("model") or "").strip()[:256]
-        # API 已配置且调用方未传 enabled 时默认启用；显式 false 始终优先。
-        enabled = (
-            bool(raw.get("enabled"))
+        api_type = str(raw.get("api_type") or "chat").strip().lower()
+        if api_type not in API_TYPE_LABELS:
+            raise ValueError(
+                f"上游 {slot} 的 API 类型无效，可选值: {sorted(API_TYPE_LABELS)}"
+            )
+        # 新字段优先，旧 enabled 继续兼容；无显式开关时完整配置默认参与路由。
+        route_enabled = (
+            bool(raw.get("route_enabled"))
+            if "route_enabled" in raw
+            else bool(raw.get("enabled"))
             if "enabled" in raw
             else bool(api_base and api_key and model)
         )
+        # 当前宿主没有生图 Provider，且非聊天协议不能伪装成 Chat Provider。
+        # 分类仍会保存并按真实协议检测，但自动路由只开放聊天兼容类型。
+        if api_type not in CHAT_COMPATIBLE_API_TYPES:
+            route_enabled = False
         priority = self._bounded_priority(raw.get("priority"), slot * 10)
         # 默认开启工具调用；只有用户明确取消时才保存为 False。
         supports_tools = bool(raw.get("supports_tools", True))
@@ -1614,8 +1897,10 @@ class MultiApiRouterPlugin(Star):
             enable_thinking = MultiApiRouterProvider._enable_thinking_value(
                 existing if isinstance(existing, dict) else {}
             )
-        if enabled and (not api_base or not api_key or not model):
-            raise ValueError(f"上游 {slot} 已启用但缺少 API Base / API Key / 模型 ID")
+        if route_enabled and (not api_base or not api_key or not model):
+            raise ValueError(
+                f"上游 {slot} 已启用路由但缺少 API Base / API Key / 模型 ID"
+            )
         # 保留 extra_body：前端表单不展示该字段，这里若前端未提交则沿用已有配置，
         # 避免热重载/保存时把上游自定义请求体（如 {"enable_thinking": false}）静默清空。
         extra_body = raw.get("extra_body")
@@ -1624,7 +1909,10 @@ class MultiApiRouterPlugin(Star):
             if isinstance(existing, dict):
                 extra_body = existing.get("extra_body")
         result = {
-            "enabled": enabled,
+            # 配置落盘继续使用 enabled，避免旧配置迁移和旧版本回滚歧义；
+            # Web API 与运行态统一暴露 route_enabled 语义。
+            "enabled": route_enabled,
+            "api_type": api_type,
             "name": name,
             "api_base": api_base,
             "api_key": api_key,
@@ -1682,6 +1970,7 @@ class MultiApiRouterPlugin(Star):
                     raise ValueError("global 必须是对象")
                 allowed_global = {
                     "enabled", "provider_id", "request_timeout_seconds",
+                    "route_timeout_seconds",
                     "max_attempts", "failure_threshold", "cooldown_seconds",
                     "max_concurrency", "max_input_chars", "max_output_tokens",
                     "health_check_timeout_seconds", "skip_unhealthy_upstreams",

@@ -485,7 +485,8 @@ main {
   font-size: 11px;
 }
 
-.field input {
+.field input,
+.field select {
   width: 100%;
   min-height: 36px;
   padding: 7px 10px;
@@ -497,9 +498,19 @@ main {
   font-size: 13px;
 }
 
-.field input:focus {
+.field select {
+  appearance: auto;
+}
+
+.field input:focus,
+.field select:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+.chat-option[hidden],
+.tag[hidden] {
+  display: none;
 }
 
 .inline-check {

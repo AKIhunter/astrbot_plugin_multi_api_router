@@ -20,6 +20,17 @@
       "step": 5
     }
   },
+  "route_timeout_seconds": {
+    "description": "自动路由总超时限制（秒）",
+    "type": "int",
+    "default": 90,
+    "slider": {
+      "min": 5,
+      "max": 600,
+      "step": 5
+    },
+    "hint": "覆盖并发排队、逐个上游尝试和主模型回退；达到总时限后停止后续调用。指定单个上游时仍使用单上游请求超时。"
+  },
   "max_attempts": {
     "description": "单次请求最多尝试几个上游",
     "type": "int",
@@ -64,8 +75,8 @@
   "max_input_chars": {
     "description": "单次请求最大输入字符数",
     "type": "int",
-    "default": 48000,
-    "hint": "超出后直接拒绝，不调用任何上游。字符数是跨模型通用的保守预算。"
+    "default": 262144,
+    "hint": "默认 262144（256 Ki 字符）。超出后直接拒绝，不调用任何上游。字符数是跨模型通用预算。"
   },
   "max_output_tokens": {
     "description": "单次请求最大输出 Token",
@@ -148,9 +159,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -203,9 +232,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -257,9 +304,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -311,9 +376,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -365,9 +448,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -419,9 +520,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -473,9 +592,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -527,9 +664,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -581,9 +736,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -635,9 +808,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -689,9 +880,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -743,9 +952,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -797,9 +1024,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -851,9 +1096,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -905,9 +1168,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -959,9 +1240,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -1013,9 +1312,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -1067,9 +1384,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -1121,9 +1456,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",
@@ -1175,9 +1528,27 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用",
+        "description": "启用路由",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "仅聊天、图转文、多模态可加入当前自动路由；关闭后不影响配置完整的聊天兼容 API 被直接指定。其他类型保存分类并按对应协议检测。"
+      },
+      "api_type": {
+        "description": "API 类型",
+        "type": "string",
+        "default": "chat",
+        "options": [
+          "chat",
+          "image_generation",
+          "image_to_text",
+          "embedding",
+          "rerank",
+          "stt",
+          "tts",
+          "asr",
+          "multimodal"
+        ],
+        "hint": "chat=聊天，image_generation=文/图生图，image_to_text=图转文，multimodal=多模态。非聊天协议不会进入 Chat Completions 路由。"
       },
       "name": {
         "description": "名称",

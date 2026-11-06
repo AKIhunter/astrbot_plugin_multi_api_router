@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>模型 API 上游配置与检测</title>
-    <link rel="stylesheet" href="./style.css?v=1.3.3" />
+    <link rel="stylesheet" href="./style.css?v=1.3.3-routing-types" />
   </head>
   <body>
     <header class="topbar">
@@ -22,7 +22,7 @@
 
     <main>
       <section class="summary" aria-label="上游摘要">
-        <div><strong id="enabled-count">0</strong><span>已启用</span></div>
+        <div><strong id="enabled-count">0</strong><span>参与路由</span></div>
         <div><strong id="healthy-count">0</strong><span>检测正常</span></div>
         <div><strong id="configured-count">0</strong><span>配置完整</span></div>
       </section>
@@ -38,7 +38,7 @@
 
         <section class="col-upstreams" aria-label="上游列表">
           <div class="panel-title-row">
-            <h2 class="panel-title">上游 API（按拖拽顺序调用）</h2>
+            <h2 class="panel-title">上游 API（按类型与拖拽顺序调用）</h2>
             <div class="title-row-actions">
               <button class="button secondary" id="add-upstream" type="button">新增 API</button>
             </div>
@@ -57,6 +57,7 @@
           <button type="button" class="upstream-toggle" aria-expanded="false">
             <span class="slot"></span>
             <span class="upstream-name"></span>
+            <span class="tag type-tag"></span>
             <span class="tag tool-tag">工具</span>
             <span class="tag thinking-tag">直出</span>
             <span class="badge state-badge"></span>
@@ -71,19 +72,33 @@
           <div class="option-row">
             <label class="inline-check">
               <input type="checkbox" class="upstream-enabled" />
-              <span>启用此上游</span>
+              <span>启用路由</span>
             </label>
-            <label class="inline-check">
+            <label class="inline-check chat-option">
               <input type="checkbox" class="tools" />
               <span>支持工具调用</span>
             </label>
-            <label class="inline-check">
+            <label class="inline-check chat-option">
               <input type="checkbox" class="thinking" />
               <span>启用思考能力</span>
             </label>
           </div>
           <p class="pinned-hint"></p>
           <div class="form-grid">
+            <label class="field">
+              <span>API 类型</span>
+              <select class="api-type">
+                <option value="chat">聊天</option>
+                <option value="image_generation">文/图生图</option>
+                <option value="image_to_text">图转文</option>
+                <option value="embedding">Embedding</option>
+                <option value="rerank">Rerank</option>
+                <option value="stt">STT</option>
+                <option value="tts">TTS</option>
+                <option value="asr">ASR</option>
+                <option value="multimodal">多模态</option>
+              </select>
+            </label>
             <label class="field">
               <span>名称</span>
               <input type="text" class="name" maxlength="80" placeholder="例如 SiliconFlow" />
@@ -123,7 +138,7 @@
         <div class="help-list">
           <section>
             <h3>整体模式 Provider ID</h3>
-            <p>其他插件选择 <code>multi_api_router</code> 后，会按右侧从上到下的顺序自动选择上游。例如 #1 请求失败后尝试 #2，直到达到最大尝试次数。</p>
+            <p>其他插件选择 <code>multi_api_router</code> 后，会按右侧从上到下的顺序尝试已启用路由的聊天兼容 API。任一 API 返回响应后立即停止，不再调用后续 API。</p>
           </section>
           <section>
             <h3>启用路由 Provider</h3>
@@ -139,12 +154,17 @@
             <p>开启后，最近健康检查明确失败的 API 会被临时跳过并写日志。例如 #1 返回 HTTP 402，下一次请求会直接从 #2 开始。</p>
           </section>
           <section>
-            <h3>拖拽排序</h3>
-            <p>按住每条 API 左侧的三点拖动整行。页面显示的 #1、#2、#3 会自动重排；保存后，上方 API 的调用级别更高。</p>
+            <h3>路由超时与拖拽排序</h3>
+            <p>“路由超时限制”覆盖排队、逐个尝试和主模型回退，达到总时限后立即停止。按住左侧三点拖动整行；同类 API 中越靠上越先调用。</p>
           </section>
           <section>
             <h3>单个 API 配置</h3>
-            <p>新增 API 默认勾选“启用此上游”。取消勾选后展示条显示“已禁用”，整体自动路由会跳过该 API，其他插件也不会再看到它的指定上游选项。启用但缺少必填项时无法保存。</p>
+            <p>新增 API 默认勾选“启用路由”。取消后只退出整体自动路由，配置完整的聊天、图转文和多模态 API 仍可被其他插件直接指定使用。启用路由但缺少必填项时无法保存。</p>
+          </section>
+          <section>
+            <h3>API 类型</h3>
+            <p>聊天、图转文和多模态使用 Chat Completions，可参与当前整体路由并注册直连 Provider。生图、Embedding、Rerank、STT、TTS、ASR 按各自协议检测，不会被错误发送到聊天接口。</p>
+            <p>生图和 TTS 只做手动检测，检测会真实生成最小结果，可能产生少量费用；自动每小时检测不会调用这两类 API。</p>
           </section>
           <section>
             <h3>工具调用</h3>
@@ -179,6 +199,6 @@
     </div>
 
     <div class="toast" id="toast" hidden></div>
-    <script type="module" src="./app.js?v=1.3.3"></script>
+    <script type="module" src="./app.js?v=1.3.3-input-limit"></script>
   </body>
 </html>

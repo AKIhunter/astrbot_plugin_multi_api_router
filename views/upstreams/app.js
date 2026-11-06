@@ -15,11 +15,37 @@ const expanded = new Set();
 let draggingSlot = null;
 let lastOperationSnapshot = null;
 const MAX_UPSTREAMS = 20;
+const API_TYPE_LABELS = {
+  chat: "聊天",
+  image_generation: "文/图生图",
+  image_to_text: "图转文",
+  embedding: "Embedding",
+  rerank: "Rerank",
+  stt: "STT",
+  tts: "TTS",
+  asr: "ASR",
+  multimodal: "多模态",
+};
+const CHAT_COMPATIBLE_TYPES = new Set(["chat", "image_to_text", "multimodal"]);
 
-// 页面只保留需要经常改的策略项；超时、并发、预算等仍在 AstrBot 插件配置里。
+// 页面只保留需要经常改的策略项；并发和输出预算等仍在 AstrBot 插件配置里。
 const GLOBAL_FIELDS = [
   { key: "enabled", label: "启用路由 Provider", type: "checkbox" },
   { key: "provider_id", label: "整体模式 Provider ID", type: "text" },
+  {
+    key: "route_timeout_seconds",
+    label: "路由超时限制（秒）",
+    type: "number",
+    min: 5,
+    max: 600,
+  },
+  {
+    key: "max_input_chars",
+    label: "单次请求最大输入字符数",
+    type: "number",
+    min: 1000,
+    max: 2000000,
+  },
   { key: "fallback_to_main_model", label: "真实调用失败后回退主模型", type: "checkbox" },
   { key: "fallback_provider_id", label: "回退 Provider ID（留空用默认主模型）", type: "text" },
   { key: "skip_unhealthy_upstreams", label: "跳过健康检查不通的上游", type: "checkbox" },
@@ -51,7 +77,7 @@ function healthClass(health) {
 
 function visibleUpstreams() {
   return state.upstreams
-    .filter((item) => item.enabled || item.configured || addedSlots.has(item.slot))
+    .filter((item) => item.route_enabled || item.configured || addedSlots.has(item.slot))
     .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.slot - b.slot);
 }
 
@@ -96,7 +122,9 @@ function syncStateFromForm() {
     const slot = Number(article.dataset.slot);
     const item = state.upstreams.find((upstream) => Number(upstream.slot) === slot);
     if (!item) return;
-    item.enabled = article.querySelector(".upstream-enabled").checked;
+    item.route_enabled = article.querySelector(".upstream-enabled").checked;
+    item.enabled = item.route_enabled;
+    item.api_type = article.querySelector(".api-type").value;
     item.name = article.querySelector(".name").value.trim();
     item.api_base = article.querySelector(".api-base").value.trim();
     item.api_key = article.querySelector(".api-key").value.trim();
@@ -185,7 +213,9 @@ function renderGlobalFields() {
 function updateSummary() {
   const upstreams = state.upstreams;
   document.querySelector("#enabled-count").textContent = upstreams.filter(
-    (item) => item.enabled,
+    (item) =>
+      item.route_enabled &&
+      CHAT_COMPATIBLE_TYPES.has(item.api_type || "chat"),
   ).length;
   document.querySelector("#configured-count").textContent = upstreams.filter(
     (item) => item.configured,
@@ -236,18 +266,27 @@ function render() {
       thinkingTag.classList.remove("on");
       thinkingTag.textContent = "直出";
     }
+    const typeTag = fragment.querySelector(".type-tag");
 
     const badge = fragment.querySelector(".state-badge");
     const updateEnabledBadge = () => {
       badge.className = "badge state-badge";
-      if (!upstream.enabled) {
-        badge.textContent = "已禁用";
+      const chatCompatible = CHAT_COMPATIBLE_TYPES.has(
+        upstream.api_type || "chat",
+      );
+      if (!chatCompatible && upstream.configured) {
+        badge.textContent = "协议分类";
+        badge.classList.add("muted");
+        return;
+      }
+      if (!upstream.route_enabled) {
+        badge.textContent = upstream.configured ? "仅直连" : "未加入路由";
         badge.classList.add("muted");
       } else if (!upstream.configured) {
         badge.textContent = "配置不完整";
         badge.classList.add("muted");
       } else {
-        badge.textContent = "已启用";
+        badge.textContent = "路由中";
         badge.classList.add("enabled");
       }
     };
@@ -271,9 +310,11 @@ function render() {
 
     // 详情区字段
     const enabledInput = fragment.querySelector(".upstream-enabled");
-    enabledInput.checked = Boolean(upstream.enabled);
+    const enabledText = enabledInput.closest("label").querySelector("span");
+    enabledInput.checked = Boolean(upstream.route_enabled);
     enabledInput.addEventListener("change", () => {
-      upstream.enabled = enabledInput.checked;
+      upstream.route_enabled = enabledInput.checked;
+      upstream.enabled = upstream.route_enabled;
       updateEnabledBadge();
       updateSummary();
       markDirty();
@@ -284,9 +325,39 @@ function render() {
     fragment.querySelector(".model").value = escapeText(upstream.model);
     fragment.querySelector(".tools").checked = Boolean(upstream.supports_tools);
     fragment.querySelector(".thinking").checked = Boolean(upstream.enable_thinking);
-    fragment.querySelector(".pinned-hint").textContent = upstream.provider_label
-      ? `在 AstrBot 或其他插件中选择「${upstream.provider_label}」即可固定使用该上游`
-      : "";
+    const apiTypeSelect = fragment.querySelector(".api-type");
+    apiTypeSelect.value = upstream.api_type || "chat";
+    const pinnedHint = fragment.querySelector(".pinned-hint");
+    const applyTypeUi = () => {
+      const apiType = apiTypeSelect.value;
+      const chatCompatible = CHAT_COMPATIBLE_TYPES.has(apiType);
+      typeTag.textContent = API_TYPE_LABELS[apiType] || apiType;
+      enabledInput.disabled = !chatCompatible;
+      if (!chatCompatible) enabledInput.checked = false;
+      enabledText.textContent = chatCompatible
+        ? "启用路由"
+        : "此类型暂不接入自动路由";
+      toolTag.hidden = !chatCompatible;
+      thinkingTag.hidden = !chatCompatible;
+      article.querySelectorAll(".chat-option").forEach((control) => {
+        control.hidden = !chatCompatible;
+      });
+      pinnedHint.textContent = chatCompatible && upstream.provider_label
+        ? `可直接指定「${upstream.provider_label}」；关闭“启用路由”不影响直连`
+        : `按 ${API_TYPE_LABELS[apiType] || apiType} 协议检测，不会进入聊天 Provider`;
+    };
+    apiTypeSelect.addEventListener("change", () => {
+      upstream.api_type = apiTypeSelect.value;
+      upstream.chat_compatible = CHAT_COMPATIBLE_TYPES.has(upstream.api_type);
+      enabledInput.checked = upstream.chat_compatible;
+      upstream.route_enabled = enabledInput.checked;
+      upstream.enabled = upstream.route_enabled;
+      applyTypeUi();
+      updateEnabledBadge();
+      updateSummary();
+      markDirty();
+    });
+    applyTypeUi();
 
     const status = fragment.querySelector(".health-status");
     const detail = fragment.querySelector(".health-detail");
@@ -295,6 +366,7 @@ function render() {
       detail.textContent = [
         `${health.latency_ms}ms`,
         health.http_status ? `HTTP ${health.http_status}` : "",
+        health.protocol || "",
         formatTime(health.checked_at),
       ]
         .filter(Boolean)
@@ -362,8 +434,8 @@ function render() {
     applyExpand();
 
     // 编辑输入即标记未保存（详情区里的输入，含折叠态）
-    article.querySelectorAll("input").forEach((input) => {
-      if (input === enabledInput) return;
+    article.querySelectorAll("input, select").forEach((input) => {
+      if (input === enabledInput || input === apiTypeSelect) return;
       input.addEventListener(input.type === "checkbox" ? "change" : "input", markDirty);
     });
 
@@ -413,11 +485,13 @@ function addUpstream() {
   // 优先复用配置里已存在但页面隐藏的空槽位（历史备份槽位），
   // 避免直接顶到 20 个上限而无法新增。
   const reusable = state.upstreams.find(
-    (item) => !item.enabled && !item.configured && !addedSlots.has(item.slot),
+    (item) => !item.route_enabled && !item.configured && !addedSlots.has(item.slot),
   );
   if (reusable) {
     captureOperationSnapshot();
+    reusable.route_enabled = true;
     reusable.enabled = true;
+    reusable.api_type = "chat";
     reusable.supports_tools = true;
     reusable.enable_thinking = false;
     reusable.priority = nextPriority();
@@ -442,7 +516,9 @@ function addUpstream() {
   captureOperationSnapshot();
   state.upstreams.push({
     slot: nextSlot,
+    route_enabled: true,
     enabled: true,
+    api_type: "chat",
     configured: false,
     name: "",
     api_base: "",
@@ -526,7 +602,8 @@ function collectPayload() {
     const slot = article.dataset.slot;
     const order = visibleArticles.indexOf(article);
     payload[`upstream_${slot}`] = {
-      enabled: article.querySelector(".upstream-enabled").checked,
+      route_enabled: article.querySelector(".upstream-enabled").checked,
+      api_type: article.querySelector(".api-type").value,
       name: article.querySelector(".name").value.trim(),
       api_base: article.querySelector(".api-base").value.trim(),
       api_key: article.querySelector(".api-key").value.trim(),
@@ -552,8 +629,8 @@ async function save() {
     if (!key.startsWith("upstream_")) continue;
     const slot = key.slice("upstream_".length);
     const item = payload[key];
-    if (item.enabled && (!item.api_base || !item.api_key || !item.model)) {
-      showToast(`上游 ${slot} 已启用但缺少 ${!item.api_base ? "API Base" : !item.api_key ? "API Key" : "模型 ID"}，无法保存`, true);
+    if (item.route_enabled && (!item.api_base || !item.api_key || !item.model)) {
+      showToast(`上游 ${slot} 已启用路由但缺少 ${!item.api_base ? "API Base" : !item.api_key ? "API Key" : "模型 ID"}，无法保存`, true);
       return;
     }
   }
@@ -607,10 +684,12 @@ document.addEventListener("keydown", (event) => {
 
 function editorInputFromTarget(target) {
   if (!(target instanceof Element)) return null;
-  const direct = target.closest("input[data-global-key], .upstream input");
+  const direct = target.closest("input[data-global-key], .upstream input, .upstream select");
   if (direct) return direct;
   const label = target.closest("label");
-  return label?.querySelector("input[data-global-key], .upstream input") || null;
+  return label?.querySelector(
+    "input[data-global-key], .upstream input, .upstream select",
+  ) || null;
 }
 
 // 在控件真正改变前记录快照；鼠标和键盘切换输入框都覆盖。
