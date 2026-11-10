@@ -167,7 +167,16 @@ function syncStateFromForm() {
     item.api_type = article.querySelector(".api-type").value;
     item.name = article.querySelector(".name").value.trim();
     item.api_base = article.querySelector(".api-base").value.trim();
-    item.api_key = article.querySelector(".api-key").value.trim();
+    const keyInput = article.querySelector(".api-key");
+    const keyValue = keyInput.value.trim();
+    // 掩码或「显示」出来的明文都视为未编辑：保留原 api_key，避免回写覆盖真 Key。
+    const keyUntouched = keyValue.includes("****")
+      || (item._keyRevealed && keyValue === (item._revealedApiKey || ""));
+    if (!keyUntouched) {
+      item.api_key = keyValue;
+      item._keyRevealed = false;
+      item._revealedApiKey = "";
+    }
     item.model = article.querySelector(".model").value.trim();
     item.priority = (index + 1) * 10;
     item.supports_tools = article.querySelector(".tools").checked;
@@ -376,7 +385,47 @@ function render() {
     });
     fragment.querySelector(".name").value = escapeText(upstream.name);
     fragment.querySelector(".api-base").value = escapeText(upstream.api_base);
-    fragment.querySelector(".api-key").value = escapeText(upstream.api_key || "");
+    const apiKeyInput = fragment.querySelector(".api-key");
+    const revealKeyButton = fragment.querySelector(".reveal-key-button");
+    // 默认只展示掩码（如 sk-a1b2****cdef）；点击「显示」才临时取明文。
+    // 明文只存在当前页面内存，不写 localStorage，也不进页面源码。
+    if (upstream._keyRevealed && upstream._revealedApiKey) {
+      apiKeyInput.value = escapeText(upstream._revealedApiKey);
+      apiKeyInput.type = "text";
+      revealKeyButton.textContent = "隐藏";
+    } else {
+      apiKeyInput.value = escapeText(upstream.api_key || "");
+      // 掩码用 text 才看得见前后缀；兼容开关返回明文时沿用 password 隐藏。
+      apiKeyInput.type = `${upstream.api_key || ""}`.includes("****") ? "text" : "password";
+      revealKeyButton.textContent = "显示";
+    }
+    // 只有确实存在密钥且当前是掩码形态时才提供「显示」。
+    revealKeyButton.hidden = !(`${upstream.api_key || ""}`.includes("****"));
+    revealKeyButton.addEventListener("click", async () => {
+      if (upstream._keyRevealed) {
+        upstream._keyRevealed = false;
+        apiKeyInput.value = escapeText(upstream.api_key || "");
+        apiKeyInput.type = `${upstream.api_key || ""}`.includes("****") ? "text" : "password";
+        revealKeyButton.textContent = "显示";
+        return;
+      }
+      revealKeyButton.disabled = true;
+      try {
+        const response = await bridge.apiPost("upstreams/config/reveal", {
+          slot: upstream.slot,
+        });
+        upstream._revealedApiKey = response.api_key || "";
+        upstream._keyRevealed = true;
+        apiKeyInput.value = escapeText(upstream._revealedApiKey);
+        apiKeyInput.type = "text";
+        revealKeyButton.textContent = "隐藏";
+        showToast(`${upstreamLabel(upstream.slot)} 已显示明文，本次查看已写入审计日志`);
+      } catch (error) {
+        showToast(error.message || "无法查看 API Key", true);
+      } finally {
+        revealKeyButton.disabled = false;
+      }
+    });
     const modelInput = fragment.querySelector(".model");
     const modelOptions = fragment.querySelector(".model-options");
     const modelListHint = fragment.querySelector(".model-list-hint");
@@ -424,18 +473,23 @@ function render() {
     fetchModelsButton.addEventListener("click", async () => {
       const apiBase = article.querySelector(".api-base").value.trim();
       const apiKey = article.querySelector(".api-key").value.trim();
-      if (!apiBase || !apiKey) {
-        showToast(`${upstreamLabel(upstream.slot)} 请先填写 API Base 和 API Key`, true);
+      if (!apiBase) {
+        showToast(`${upstreamLabel(upstream.slot)} 请先填写 API Base`, true);
         return;
       }
+      // 未编辑（仍是掩码、加载值或「显示」出来的原文）时不提交 key，
+      // 改传 slot 让后端读取已保存密钥。
+      const keyUnchanged = apiKey.includes("****")
+        || apiKey === (upstream.api_key || "")
+        || (upstream._keyRevealed && apiKey === (upstream._revealedApiKey || ""));
+      const requestBody = { api_base: apiBase };
+      if (keyUnchanged) requestBody.slot = upstream.slot;
+      else requestBody.api_key = apiKey;
       fetchModelsButton.disabled = true;
       fetchModelsButton.textContent = "获取中…";
       modelListHint.textContent = "正在读取模型列表";
       try {
-        const response = await bridge.apiPost("upstreams/models", {
-          api_base: apiBase,
-          api_key: apiKey,
-        });
+        const response = await bridge.apiPost("upstreams/models", requestBody);
         modelOptions.replaceChildren(
           ...response.models.map((model) => {
             const option = document.createElement("option");
@@ -706,18 +760,31 @@ function collectPayload() {
   list.querySelectorAll(".upstream").forEach((article) => {
     const slot = article.dataset.slot;
     const order = visibleArticles.indexOf(article);
-    payload[`upstream_${slot}`] = {
+    const stateItem = state.upstreams.find((item) => Number(item.slot) === Number(slot));
+    const keyValue = article.querySelector(".api-key").value.trim();
+    // 未编辑判定：仍是掩码、仍等于加载值、或仍是「显示」出来的原文。
+    // 命中时省略 api_key，由后端沿用已保存密钥，避免把真 Key 覆盖成星号。
+    const keyUnchanged = Boolean(
+      keyValue
+      && (
+        keyValue.includes("****")
+        || keyValue === (stateItem?.api_key || "")
+        || (stateItem?._keyRevealed && keyValue === (stateItem._revealedApiKey || ""))
+      ),
+    );
+    const payloadItem = {
       route_enabled: article.querySelector(".upstream-enabled").checked,
       api_type: article.querySelector(".api-type").value,
       name: article.querySelector(".name").value.trim(),
       api_base: article.querySelector(".api-base").value.trim(),
-      api_key: article.querySelector(".api-key").value.trim(),
       model: article.querySelector(".model").value.trim(),
       // 页面不再暴露数字优先级，按可见列表拖拽顺序自动写入。
       priority: (order + 1) * 10,
       supports_tools: article.querySelector(".tools").checked,
       enable_thinking: article.querySelector(".thinking").checked,
     };
+    if (!keyUnchanged) payloadItem.api_key = keyValue;
+    payload[`upstream_${slot}`] = payloadItem;
   });
   if (pendingDelete.size > 0) {
     payload.delete_slots = Array.from(pendingDelete);
@@ -743,8 +810,13 @@ async function save() {
     if (!key.startsWith("upstream_")) continue;
     const slot = key.slice("upstream_".length);
     const item = payload[key];
-    if (item.route_enabled && (!item.api_base || !item.api_key || !item.model)) {
-      showToast(`${upstreamLabel(slot)} 已启用路由但缺少 ${!item.api_base ? "API Base" : !item.api_key ? "API Key" : "模型 ID"}，无法保存`, true);
+    const stateItem = state.upstreams.find((entry) => Number(entry.slot) === Number(slot));
+    // payload 省略 api_key 代表沿用已保存密钥，此时用加载时的存在标记判断完整性。
+    const hasKey = Object.prototype.hasOwnProperty.call(item, "api_key")
+      ? Boolean(item.api_key)
+      : Boolean(stateItem?.api_key_present || stateItem?.api_key);
+    if (item.route_enabled && (!item.api_base || !hasKey || !item.model)) {
+      showToast(`${upstreamLabel(slot)} 已启用路由但缺少 ${!item.api_base ? "API Base" : !hasKey ? "API Key" : "模型 ID"}，无法保存`, true);
       return;
     }
   }

@@ -1,4 +1,10 @@
 {
+  "expose_plain_api_keys": {
+    "description": "兼容旧行为：/upstreams/config 返回明文 API Key",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。关闭时接口只回显掩码（如 sk-a1b2****cdef），明文需在页面点击「显示」，且会记录审计日志。仅在需要回退旧行为时临时开启。"
+  },
   "enabled": {
     "description": "启用路由 Provider",
     "type": "bool",

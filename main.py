@@ -44,6 +44,11 @@ PINNED_PROVIDER_PREFIX = f"{PROVIDER_TYPE}:upstream_"
 MAX_UPSTREAMS = 20
 MIN_UPSTREAMS = 5
 MAX_MODEL_OPTIONS = 500
+# 控制台接口默认只回显掩码：保留前缀与末 4 位，中间固定 ****。
+# 兼容开关 expose_plain_api_keys（默认关闭）可恢复旧行为。
+API_KEY_MASK = "****"
+# 明文 Key 揭示审计文件名，存放在插件数据目录下；记录内容不包含 Key 本身。
+API_KEY_REVEAL_AUDIT = "api_key_reveal_audit.jsonl"
 DEFAULT_MAX_INPUT_CHARS = 256 * 1024
 API_TYPE_LABELS = {
     "chat": "聊天",
@@ -1564,7 +1569,14 @@ class MultiApiRouterPlugin(Star):
             f"/{PLUGIN_NAME}/upstreams/config",
             self.api_upstreams_config,
             ["GET"],
-            "读取模型 API 上游完整配置（含密钥，仅控制台调用）",
+            "读取模型 API 上游配置（API Key 默认掩码，仅控制台调用）",
+        )
+        # 明文 Key 只在用户点击「显示」时按需返回，独立路径便于鉴权与审计。
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/upstreams/config/reveal",
+            self.api_reveal_upstream_key,
+            ["POST"],
+            "按需揭示单个上游的明文 API Key（需登录，写审计日志）",
         )
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/upstreams/save",
@@ -1954,7 +1966,7 @@ class MultiApiRouterPlugin(Star):
         payload = await request.json(default={})
         if not isinstance(payload, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
-        unknown = set(payload) - {"api_base", "api_key"}
+        unknown = set(payload) - {"api_base", "api_key", "slot"}
         if unknown:
             return error_response(
                 f"包含不支持的字段: {sorted(unknown)}",
@@ -1963,7 +1975,24 @@ class MultiApiRouterPlugin(Star):
         try:
             api_base = self._normalize_model_api_base(payload.get("api_base"))
             api_key = str(payload.get("api_key") or "").strip()[:2048]
-            if not api_key:
+            # 页面默认展示掩码；未编辑时用 slot 读取已保存密钥，避免要求用户重新输入。
+            if (not api_key or self._is_masked_api_key(api_key)) and payload.get("slot") is not None:
+                try:
+                    slot = int(payload.get("slot"))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"slot 必须是 1 到 {MAX_UPSTREAMS} 之间的整数"
+                    )
+                if slot < 1 or slot > MAX_UPSTREAMS:
+                    raise ValueError(f"slot 必须在 1 到 {MAX_UPSTREAMS} 之间")
+                saved = self.config.get(f"upstream_{slot}")
+                saved_key = (
+                    str(saved.get("api_key") or "").strip()
+                    if isinstance(saved, dict) else ""
+                )
+                if saved_key:
+                    api_key = saved_key
+            if not api_key or self._is_masked_api_key(api_key):
                 raise ValueError("请先填写 API Key")
             async with self._model_list_semaphore:
                 models, truncated = await self._fetch_visible_models(
@@ -2003,16 +2032,40 @@ class MultiApiRouterPlugin(Star):
             }
         )
 
-    # 上游完整配置（含 api_key），供控制台编辑表单回填。
-    # 该接口会暴露密钥，AstrBot 控制台页面本身需要登录，插件无法自行鉴权；
-    # 这里约定只在 views 页面（管理员）调用，不暴露给聊天命令。
-    def _upstream_full_data(self, slot: int) -> dict:
+    @staticmethod
+    def _mask_api_key(api_key: str) -> str:
+        """把 API Key 转成可安全展示的掩码（保留前缀与末 4 位）。
+
+        Args:
+            api_key: 原始密钥文本。
+
+        Returns:
+            形如 ``sk-a1b2****cdef`` 的掩码；空值返回空串，过短的密钥整体遮蔽。
+        """
+        key = str(api_key or "").strip()
+        if not key:
+            return ""
+        # 长度不足时无法安全保留前后缀，整体遮蔽避免泄露过多字符。
+        if len(key) <= 8:
+            return API_KEY_MASK
+        return f"{key[: min(7, len(key) - 5)]}{API_KEY_MASK}{key[-4:]}"
+
+    @staticmethod
+    def _is_masked_api_key(value: Any) -> bool:
+        """判断表单提交的 API Key 是否仍是掩码形态（即用户未真正编辑）。"""
+        return API_KEY_MASK in str(value or "")
+
+    # 上游完整配置，供控制台编辑表单回填。
+    # 默认只返回掩码（保留前缀与末 4 位）；兼容开关打开时才回退为明文。
+    # 明文需走 /upstreams/config/reveal（带登录态校验与审计）。
+    def _upstream_full_data(self, slot: int, *, expose_plain_key: bool = False) -> dict:
         raw = self.config.get(f"upstream_{slot}") or {}
         if not isinstance(raw, dict):
             raw = {}
         api_base = str(raw.get("api_base") or "").strip()
         api_key = str(raw.get("api_key") or "").strip()
         model = str(raw.get("model") or "").strip()
+        api_key_masked = self._mask_api_key(api_key)
         return {
             "slot": slot,
             "route_enabled": MultiApiRouterProvider._chat_route_enabled(raw),
@@ -2022,7 +2075,10 @@ class MultiApiRouterPlugin(Star):
             "configured": bool(api_base and api_key and model),
             "name": str(raw.get("name") or "").strip(),
             "api_base": api_base,
-            "api_key": api_key,
+            # api_key 是表单回填值（默认掩码）；api_key_present 供页面判断是否显示「显示」按钮。
+            "api_key": api_key if expose_plain_key else api_key_masked,
+            "api_key_masked": api_key_masked,
+            "api_key_present": bool(api_key),
             "model": model,
             "api_type": MultiApiRouterProvider._api_type(raw),
             "api_type_label": API_TYPE_LABELS[
@@ -2131,8 +2187,100 @@ class MultiApiRouterPlugin(Star):
                 "strategy": self._strategy_data(),
                 "global": global_fields,
                 "upstreams": [
-                    self._upstream_full_data(slot) for slot in self._render_slots()
+                    self._upstream_full_data(
+                        slot,
+                        expose_plain_key=bool(
+                            self.config.get("expose_plain_api_keys", False)
+                        ),
+                    )
+                    for slot in self._render_slots()
                 ],
+            }
+        )
+
+    def _reveal_audit_path(self) -> Path:
+        """审计日志与 auto_bindings.json 同目录，便于随插件数据一起备份。"""
+        return self._state_path.parent / API_KEY_REVEAL_AUDIT
+
+    def _write_reveal_audit(self, record: dict) -> bool:
+        """追加一条明文 Key 揭示审计记录；写入失败返回 False（调用方应拒绝返回密钥）。"""
+        try:
+            path = self._reveal_audit_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.exception("[MultiApiRouter] 写入 API Key 揭示审计日志失败")
+            return False
+        return True
+
+    async def api_reveal_upstream_key(self):
+        """按需揭示单个上游的明文 API Key。
+
+        安全约束：
+        - 必须带控制台登录态（request.username 由 Dashboard JWT 注入）；
+        - 每次调用都先写审计日志（谁、何时、哪个上游、来源 IP/UA），日志不记 Key；
+        - 审计写入失败时拒绝返回密钥，避免出现无记录的明文外泄。
+        """
+        username = str(getattr(request, "username", "") or "").strip()
+        if not username:
+            return error_response(
+                "需要登录 AstrBot 控制台后才能查看 API Key",
+                status_code=401,
+            )
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        unknown = set(payload) - {"slot"}
+        if unknown:
+            return error_response(
+                f"包含不支持的字段: {sorted(unknown)}",
+                status_code=400,
+            )
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            return error_response(
+                f"slot 必须是 1 到 {MAX_UPSTREAMS} 之间的整数",
+                status_code=400,
+            )
+        if slot < 1 or slot > MAX_UPSTREAMS:
+            return error_response(
+                f"slot 必须在 1 到 {MAX_UPSTREAMS} 之间",
+                status_code=400,
+            )
+        raw = self.config.get(f"upstream_{slot}")
+        raw = raw if isinstance(raw, dict) else {}
+        api_key = str(raw.get("api_key") or "").strip()
+        if not api_key:
+            return error_response("该上游尚未配置 API Key", status_code=404)
+
+        headers = getattr(request, "headers", {}) or {}
+        record = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "timestamp": int(time.time()),
+            "username": username,
+            "slot": slot,
+            "upstream_name": str(raw.get("name") or "").strip()[:80],
+            "client_host": str(getattr(request, "client_host", "") or ""),
+            "user_agent": str(headers.get("user-agent", "") or "")[:512],
+        }
+        if not self._write_reveal_audit(record):
+            return error_response(
+                "审计日志写入失败，已拒绝返回 API Key",
+                status_code=500,
+            )
+        logger.info(
+            "[MultiApiRouter] 用户 %s 查看了上游 %s 的明文 API Key（来源 %s）。",
+            username,
+            slot,
+            record["client_host"] or "unknown",
+        )
+        return json_response(
+            {
+                "slot": slot,
+                "api_key": api_key,
+                "revealed_by": username,
             }
         )
 
@@ -2204,7 +2352,22 @@ class MultiApiRouterPlugin(Star):
             raise ValueError(f"上游 {slot} 包含不支持的字段: {sorted(unknown)}")
         name = str(raw.get("name") or "").strip()[:80]
         api_base = str(raw.get("api_base") or "").strip()[:2048]
-        api_key = str(raw.get("api_key") or "").strip()[:2048]
+        # 页面默认回显掩码。用户未编辑就直接保存时沿用已存密钥，
+        # 否则会把真 Key 覆盖成 "****"；掩码形态或与当前掩码一致都算未编辑。
+        existing_raw = self.config.get(f"upstream_{slot}")
+        existing_raw = existing_raw if isinstance(existing_raw, dict) else {}
+        existing_key = str(existing_raw.get("api_key") or "").strip()
+        submitted_key = raw.get("api_key")
+        if submitted_key is None:
+            api_key = existing_key
+        else:
+            candidate = str(submitted_key or "").strip()[:2048]
+            if self._is_masked_api_key(candidate) or (
+                existing_key and candidate == self._mask_api_key(existing_key)
+            ):
+                api_key = existing_key
+            else:
+                api_key = candidate
         model = str(raw.get("model") or "").strip()[:256]
         api_type = str(raw.get("api_type") or "chat").strip().lower()
         if api_type not in API_TYPE_LABELS:

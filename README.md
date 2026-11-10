@@ -224,6 +224,8 @@ function calling。
 - 聊天路由需提供 OpenAI Chat Completions 兼容接口；其他分类按对应 OpenAI
   兼容端点检测。
 - API Key 保存在 AstrBot 插件配置中，不会写入状态日志。
+- 控制台接口默认只回显掩码（如 `sk-a1b2****cdef`）；未编辑密钥直接保存不会覆盖原值。查看明文需点击页面「显示」，且必须已登录控制台，每次查看都会写入插件数据目录的 `api_key_reveal_audit.jsonl`（记录用户、时间、上游与来源 IP，不记录 Key 本身）。
+- 兼容开关 `expose_plain_api_keys` 默认关闭；开启后 `/upstreams/config` 恢复旧行为（返回明文），仅用于临时回滚。
 - 不要把私聊、长期记忆或敏感数据发送给不受信任的免费 API。
 - 免费额度、模型名称和工具兼容性以服务商控制台为准。
 

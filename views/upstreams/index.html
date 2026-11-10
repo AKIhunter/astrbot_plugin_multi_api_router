@@ -109,7 +109,10 @@
             </label>
             <label class="field full">
               <span>API Key</span>
-              <input type="password" class="api-key" maxlength="2048" autocomplete="off" placeholder="sk-..." />
+              <div class="model-picker-row">
+                <input type="password" class="api-key" maxlength="2048" autocomplete="off" placeholder="sk-..." />
+                <button class="button secondary reveal-key-button" type="button" title="明文仅在点击后临时显示，并写入审计日志">显示</button>
+              </div>
             </label>
             <label class="field full">
               <span>模型 ID</span>
@@ -235,6 +238,6 @@
     </div>
 
     <div class="toast" id="toast" hidden></div>
-    <script type="module" src="./app.js?v=retry-settings-20261110"></script>
+    <script type="module" src="./app.js?v=apikey-mask-20261110"></script>
   </body>
 </html>

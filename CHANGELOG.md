@@ -12,6 +12,7 @@
 - 健康检查按 API 类型调用对应协议；生图与 TTS 仅手动检测，避免自动任务产生持续费用。
 - 支持仅填写 API Base 和 API Key 获取可见模型列表，并保留模型 ID 手动输入。
 - 帮助手册新增模型输入输出能力参考表。
+- 控制台 API Key 默认掩码回显；新增 `POST /upstreams/config/reveal`（登录校验 + 审计日志，不记录 Key）与页面「显示」按钮；未编辑保存不会覆盖原 Key；新增默认关闭的兼容开关 `expose_plain_api_keys`。
 
 ### 修复
 

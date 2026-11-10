@@ -1,6 +1,9 @@
 import asyncio
+import json
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import main as router_module
@@ -429,6 +432,167 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
             loaded = await plugin.api_upstreams_config()
         self.assertEqual(loaded["global"]["upstream_retry_count"], 1)
         self.assertEqual(loaded["global"]["retry_interval_seconds"], 1.0)
+
+    def test_api_key_mask_keeps_prefix_and_suffix(self):
+        mask = router_module.MultiApiRouterPlugin._mask_api_key
+        self.assertEqual(mask("sk-a1b2c3d4cdef"), "sk-a1b2****cdef")
+        self.assertEqual(mask("short"), "****")
+        self.assertEqual(mask(""), "")
+        self.assertNotIn("c3d4", mask("sk-a1b2c3d4cdef"))
+
+    async def test_upstreams_config_masks_key_by_default(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "upstream_1": {**upstream(1), "api_key": "sk-a1b2c3d4cdef"},
+        }
+        plugin.router = None
+        plugin._health_results = {}
+        with mock.patch.object(router_module, "json_response", side_effect=lambda data: data):
+            loaded = await plugin.api_upstreams_config()
+        entry = loaded["upstreams"][0]
+        self.assertEqual(entry["api_key"], "sk-a1b2****cdef")
+        self.assertEqual(entry["api_key_masked"], "sk-a1b2****cdef")
+        self.assertTrue(entry["api_key_present"])
+        self.assertNotIn("sk-a1b2c3d4cdef", json.dumps(loaded, ensure_ascii=False))
+
+    async def test_upstreams_config_compat_switch_returns_plain_key(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "upstream_1": {**upstream(1), "api_key": "sk-a1b2c3d4cdef"},
+            "expose_plain_api_keys": True,
+        }
+        plugin.router = None
+        plugin._health_results = {}
+        with mock.patch.object(router_module, "json_response", side_effect=lambda data: data):
+            loaded = await plugin.api_upstreams_config()
+        self.assertEqual(loaded["upstreams"][0]["api_key"], "sk-a1b2c3d4cdef")
+
+    async def test_save_without_api_key_field_keeps_existing_key(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = True
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({"upstream_1": upstream(1)})
+        plugin.router = None
+        plugin._health_results = {}
+        payload = {
+            "upstream_1": {
+                key: value for key, value in upstream(1).items() if key != "api_key"
+            },
+        }
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(
+                                   json=mock.AsyncMock(return_value=payload))), \
+             mock.patch.object(router_module, "json_response",
+                               side_effect=lambda data: data), \
+             mock.patch.object(plugin, "_reload_router", new_callable=mock.AsyncMock):
+            result = await plugin.api_save_upstreams()
+        self.assertTrue(result["ok"])
+        self.assertEqual(plugin.config["upstream_1"]["api_key"], "test-key")
+        self.assertTrue(plugin.config.saved)
+
+    async def test_save_with_masked_key_keeps_existing_key(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = True
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({"upstream_1": upstream(1)})
+        plugin.router = None
+        plugin._health_results = {}
+        masked = router_module.MultiApiRouterPlugin._mask_api_key("test-key")
+        payload = {"upstream_1": {**upstream(1), "api_key": masked}}
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(
+                                   json=mock.AsyncMock(return_value=payload))), \
+             mock.patch.object(router_module, "json_response",
+                               side_effect=lambda data: data), \
+             mock.patch.object(plugin, "_reload_router", new_callable=mock.AsyncMock):
+            result = await plugin.api_save_upstreams()
+        self.assertTrue(result["ok"])
+        self.assertEqual(plugin.config["upstream_1"]["api_key"], "test-key")
+
+    async def test_list_models_uses_saved_key_when_masked(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "upstream_1": {**upstream(1), "api_key": "sk-a1b2c3d4cdef"},
+        }
+        plugin._model_list_semaphore = asyncio.Semaphore(2)
+        payload = {
+            "api_base": "https://example.invalid/v1",
+            "api_key": "sk-a1b2****cdef",
+            "slot": 1,
+        }
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(
+                                   json=mock.AsyncMock(return_value=payload))), \
+             mock.patch.object(plugin, "_fetch_visible_models",
+                               new_callable=mock.AsyncMock,
+                               return_value=(["model-x"], False)) as fetch, \
+             mock.patch.object(router_module, "json_response",
+                               side_effect=lambda data: data):
+            result = await plugin.api_list_models()
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(fetch.await_args.args[1], "sk-a1b2c3d4cdef")
+
+    async def test_reveal_requires_login(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(
+                                   username=None,
+                                   json=mock.AsyncMock(return_value={"slot": 1}))), \
+             mock.patch.object(router_module, "error_response",
+                               side_effect=lambda message, status_code: (message, status_code)):
+            message, status = await plugin.api_reveal_upstream_key()
+        self.assertEqual(status, 401)
+        self.assertIn("登录", message)
+
+    async def test_reveal_returns_plain_key_and_writes_audit_without_key(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin._state_path = Path(tmp) / "auto_bindings.json"
+            with mock.patch.object(router_module, "request",
+                                   types.SimpleNamespace(
+                                       username="admin",
+                                       json=mock.AsyncMock(return_value={"slot": 1}),
+                                       client_host="127.0.0.1",
+                                       headers={"user-agent": "fixture-agent"})), \
+                 mock.patch.object(router_module, "json_response",
+                                   side_effect=lambda data: data):
+                result = await plugin.api_reveal_upstream_key()
+            self.assertEqual(result["api_key"], "test-key")
+            audit_text = (Path(tmp) / router_module.API_KEY_REVEAL_AUDIT).read_text(
+                encoding="utf-8"
+            )
+            record = json.loads(audit_text.strip())
+            self.assertEqual(record["username"], "admin")
+            self.assertEqual(record["slot"], 1)
+            self.assertEqual(record["client_host"], "127.0.0.1")
+            self.assertEqual(record["user_agent"], "fixture-agent")
+            self.assertNotIn("test-key", audit_text)
+
+    async def test_reveal_refuses_when_audit_cannot_be_written(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        with tempfile.TemporaryDirectory() as tmp:
+            # 用一个同名文件占住目录位置，让审计日志无法创建。
+            blocked = Path(tmp) / "blocked"
+            blocked.write_text("", encoding="utf-8")
+            plugin._state_path = blocked / "auto_bindings.json"
+            with mock.patch.object(router_module, "request",
+                                   types.SimpleNamespace(
+                                       username="admin",
+                                       json=mock.AsyncMock(return_value={"slot": 1}),
+                                       client_host="127.0.0.1",
+                                       headers={})), \
+                 mock.patch.object(router_module, "error_response",
+                                   side_effect=lambda message, status_code: (message, status_code)):
+                message, status = await plugin.api_reveal_upstream_key()
+        self.assertEqual(status, 500)
+        self.assertNotIn("test-key", message)
 
     def test_startup_handles_old_or_malformed_retry_config(self):
         for value, expected in ((None, 1.0), ("nan", 1.0), ("bad", 1.0),
