@@ -110,13 +110,13 @@
       "max": 60,
       "step": 5
     },
-    "hint": "检测请求不重试，也不会改变业务熔断计数。"
+    "hint": "检测请求不重试，也不会改变真实调用的失败统计。"
   },
   "skip_unhealthy_upstreams": {
     "description": "自动路由跳过已确认的配置错误",
     "type": "bool",
     "default": true,
-    "hint": "检测明确失败的上游在有效期内会被跳过并写日志；不会删除上游。"
+    "hint": "检测确认的认证、权限、路径或额度错误（HTTP 401/402/403/404）在有效期内会被跳过并写日志；不会删除上游。"
   },
   "health_skip_ttl_seconds": {
     "description": "健康检查结果有效期（秒）",

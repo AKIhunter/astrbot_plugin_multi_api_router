@@ -262,6 +262,58 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
                 await provider.text_chat(prompt="fixture")
             call.assert_not_awaited()
 
+    async def test_confirmed_quota_error_is_skipped_with_http_code(self):
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        provider.health_lookup = lambda _slot: {
+            "ok": False, "checked_at": int(router_module.time.time()),
+            "http_status": 402, "status": "额度不足或欠费",
+        }
+        with mock.patch.object(provider, "_call_once") as call:
+            with self.assertRaisesRegex(RuntimeError, "没有可调用的上游"):
+                await provider.text_chat(prompt="fixture")
+            call.assert_not_awaited()
+        # 页面与日志都要能区分具体状态码。
+        self.assertIn(
+            "额度不足或欠费 / HTTP 402",
+            "\n".join(provider.status_lines()),
+        )
+        # 指定上游模式不受健康跳过影响，仍必须真实调用。
+        pinned = self.build_provider({
+            "id": f"{router_module.PINNED_PROVIDER_PREFIX}1",
+            "upstream_1": upstream(1),
+        })
+        pinned.health_lookup = provider.health_lookup
+        with mock.patch.object(pinned, "_call_once", return_value="ok") as call:
+            self.assertEqual(await pinned.text_chat(prompt="fixture"), "ok")
+            call.assert_awaited_once()
+
+    async def test_quota_error_probe_reports_insufficient_balance(self):
+        import httpx
+        from openai import APIStatusError
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        error = APIStatusError(
+            "quota exceeded",
+            response=httpx.Response(
+                402,
+                request=httpx.Request(
+                    "POST", "https://example.invalid/v1/chat/completions"
+                ),
+            ),
+            body=None,
+        )
+        client = types.SimpleNamespace(close=mock.AsyncMock())
+        with mock.patch.object(
+            router_module, "AsyncOpenAI", return_value=client
+        ), mock.patch.object(
+            plugin, "_execute_typed_probe", side_effect=error
+        ):
+            result = await plugin._probe_upstream(1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["http_status"], 402)
+        self.assertEqual(result["status"], "额度不足或欠费")
+
     def test_legacy_circuit_settings_cannot_reenable_freezing(self):
         plugin = object.__new__(router_module.MultiApiRouterPlugin)
         plugin.config = {"failure_threshold": 2, "cooldown_seconds": 300}

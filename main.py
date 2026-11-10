@@ -489,7 +489,7 @@ class MultiApiRouterProvider(Provider):
         """自动路由跳过已确认的配置错误，不移除上游。
 
         临时超时、连接错误和服务端异常只用于展示，不能冻结真实请求。
-        仅近期检测确认的认证/权限/接口配置错误可用于自动路由跳过。
+        仅近期检测确认的认证/权限/接口/额度错误可用于自动路由跳过。
         """
         # 固定选择某个 API 时必须真实调用目标，不能被自动路由的健康跳过策略拦截。
         if (
@@ -508,9 +508,13 @@ class MultiApiRouterProvider(Provider):
         if checked_at and time.time() - checked_at > self.health_skip_ttl_seconds:
             # 检测结果过期（例如插件刚启动、长时间未复检），不据此拦截真实请求。
             return ""
-        if result.get("http_status") not in {401, 403, 404}:
+        status_code = result.get("http_status")
+        # 402 表示额度不足/欠费，和认证、路径错误一样属于已确认的配置问题。
+        if status_code not in {401, 402, 403, 404}:
             return ""
-        return str(result.get("status") or "健康检查未通过")
+        status = str(result.get("status") or "健康检查未通过")
+        # 带上具体状态码，日志和页面可区分 401/402/403/404。
+        return f"{status} / HTTP {status_code}"
 
     @staticmethod
     def _retryable_error(exc: Exception) -> bool:
@@ -893,7 +897,7 @@ class MultiApiRouterProvider(Provider):
 @register(
     PLUGIN_NAME,
     "AKIhunter",
-    "多个 OpenAI 兼容 API 的优先级路由、熔断与自动降级 Provider",
+    "多个 OpenAI 兼容 API 的优先级路由、异常重试与自动降级 Provider",
     "1.3.3",
 )
 class MultiApiRouterPlugin(Star):
@@ -1787,6 +1791,9 @@ class MultiApiRouterPlugin(Star):
             error_type = type(exc).__name__
             if status_code in {401, 403}:
                 status = "认证失败"
+            elif status_code == 402:
+                # 402 是账户余额/额度问题，页面要能直接看出来。
+                status = "额度不足或欠费"
             elif status_code == 404:
                 status = "接口或模型不存在"
             elif status_code == 429:
