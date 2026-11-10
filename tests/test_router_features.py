@@ -220,7 +220,7 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
                     call.assert_awaited_once()
                     sleep.assert_not_awaited()
 
-    async def test_retry_wait_is_cancelled_at_route_deadline(self):
+    async def test_route_deadline_skips_retry_instead_of_waiting(self):
         provider = self.build_provider({"upstream_1": upstream(1)})
         provider.route_timeout_seconds = 0.02
         capacity = provider._semaphore._value
@@ -228,10 +228,35 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(client, "_prepare_chat_payload",
                                return_value=({"model": "model-1"}, [])), \
              mock.patch.object(client, "_query", side_effect=TimeoutError()) as call:
-            with self.assertRaisesRegex(RuntimeError, "超过总时限"):
+            # 新行为：不再启动注定被总时限截断的等待，直接报告剩余预算不足。
+            with self.assertRaisesRegex(RuntimeError, "剩余预算不足"):
                 await provider.text_chat(prompt="fixture")
             call.assert_awaited_once()
         self.assertEqual(provider._semaphore._value, capacity)
+
+    async def test_retry_is_skipped_when_remaining_budget_is_insufficient(self):
+        provider = self.build_provider({
+            "upstream_1": upstream(1),
+            "upstream_2": upstream(2),
+        })
+        # 10 秒总预算 < 单次超时 45 秒 + 重试间隔 1 秒：不发注定被截断的重试。
+        provider.route_timeout_seconds = 10
+        first = provider.upstreams[0].client
+        second = provider.upstreams[1].client
+        with mock.patch.object(first, "_prepare_chat_payload",
+                               return_value=({"model": "model-1"}, [])), \
+             mock.patch.object(second, "_prepare_chat_payload",
+                               return_value=({"model": "model-2"}, [])), \
+             mock.patch.object(first, "_query", side_effect=TimeoutError()) as first_call, \
+             mock.patch.object(second, "_query", return_value="next upstream") as second_call, \
+             mock.patch.object(router_module.asyncio, "sleep",
+                               new_callable=mock.AsyncMock) as sleep:
+            self.assertEqual(await provider.text_chat(prompt="fixture"), "next upstream")
+            # 第一个上游只调用一次：剩余预算不足，直接放弃重试。
+            first_call.assert_awaited_once()
+            # 可切换信号生效：同一次请求立刻落到下一个上游。
+            second_call.assert_awaited_once()
+            sleep.assert_not_awaited()
 
     async def test_pinned_provider_queue_has_total_deadline(self):
         provider = self.build_provider({
@@ -330,7 +355,8 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不按连续失败冻结接口", strategy["summary"])
 
     async def test_configured_retry_count_interval_and_disabled_retries(self):
-        for count, interval in ((0, 0), (3, 0.75), (5, 3600)):
+        # 重试间隔必须装得进总预算（默认 90s，单次 45s），否则会被新的预算前置校验跳过。
+        for count, interval in ((0, 0), (3, 0.75), (5, 0.5)):
             with self.subTest(count=count, interval=interval):
                 provider = self.build_provider({
                     "upstream_1": upstream(1),

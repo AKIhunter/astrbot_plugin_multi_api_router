@@ -90,6 +90,17 @@ AUTO_BIND_TARGETS = {
 }
 
 
+class RetryBudgetExhausted(RuntimeError):
+    """剩余总预算不足以完成一次完整重试时的切换信号。
+
+    携带原始异常，外层仍按那次真实失败记账，但不再发起注定被截断的重试。
+    """
+
+    def __init__(self, message: str, last_error: Exception):
+        super().__init__(message)
+        self.last_error = last_error
+
+
 @dataclass
 class UpstreamState:
     name: str
@@ -602,6 +613,7 @@ class MultiApiRouterProvider(Provider):
         extra_user_content_parts: list[ContentPart] | None,
         tool_choice: Literal["auto", "required"],
         kwargs: dict,
+        deadline: float | None = None,
     ) -> LLMResponse:
         if func_tool and not func_tool.empty() and not upstream.supports_tools:
             raise RuntimeError("upstream does not support tool calls")
@@ -648,6 +660,22 @@ class MultiApiRouterProvider(Provider):
                 if attempt + 1 >= max_calls or not self._retryable_error(exc):
                     raise
                 delay = self.retry_interval_seconds
+                # 只有剩余总预算够「一次完整调用 + 重试间隔」时才重试；
+                # 否则外层 wait_for 会在中途截断，等于白占一个上游的时间片。
+                if deadline is not None:
+                    left = deadline - time.monotonic()
+                    if left < self.request_timeout_seconds + delay:
+                        logger.warning(
+                            "[MultiApiRouter] 上游 %s 剩余预算 %.1fs，不足一次完整重试"
+                            "（单次超时 %ds + 重试间隔 %.2fs），跳过重试并切换下一个上游。",
+                            upstream.name,
+                            max(left, 0.0),
+                            self.request_timeout_seconds,
+                            delay,
+                        )
+                        raise RetryBudgetExhausted(
+                            f"{upstream.name} 剩余预算不足，未重试", exc
+                        ) from exc
                 logger.warning(
                     "[MultiApiRouter] 上游 %s 临时异常：%s；%.2fs 后重试（%s/%s）。",
                     upstream.name, self._safe_error(exc), delay,
@@ -778,6 +806,7 @@ class MultiApiRouterProvider(Provider):
                         extra_user_content_parts=extra_user_content_parts,
                         tool_choice=tool_choice,
                         kwargs=kwargs,
+                        deadline=deadline,
                     )
                     response = (
                         await asyncio.wait_for(call, timeout=remaining)
@@ -787,6 +816,14 @@ class MultiApiRouterProvider(Provider):
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_success(upstream, latency_ms)
                     return response
+                except RetryBudgetExhausted as exc:
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    # 真实失败已记在上游状态里；跳过重试的原因已在 _call_once 单独打日志。
+                    await self._record_failure(upstream, exc.last_error, latency_ms)
+                    errors.append(
+                        f"{upstream.name}: {self._safe_error(exc.last_error)}"
+                        "（剩余预算不足，未重试）"
+                    )
                 except Exception as exc:
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_failure(upstream, exc, latency_ms)
