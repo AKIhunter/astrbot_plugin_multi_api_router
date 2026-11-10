@@ -209,10 +209,12 @@ main {
 
 .help-list {
   display: grid;
+  min-width: 0;
   gap: 14px;
 }
 
 .help-list section {
+  min-width: 0;
   padding-bottom: 13px;
   border-bottom: 1px solid var(--line);
 }
@@ -246,6 +248,48 @@ main {
   background: var(--bg);
   color: var(--text);
   font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.capability-table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  margin-top: 9px;
+  border: 1px solid var(--line);
+}
+
+.capability-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.capability-table th,
+.capability-table td {
+  padding: 8px 9px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  text-align: left;
+  vertical-align: top;
+}
+
+.capability-table th {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.capability-table th:last-child,
+.capability-table td:last-child {
+  border-right: 0;
+}
+
+.capability-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .upstream-list {
@@ -485,6 +529,12 @@ main {
   font-size: 11px;
 }
 
+.field-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .field input,
 .field select {
   width: 100%;
@@ -506,6 +556,25 @@ main {
 .field select:focus {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+.model-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.model-picker-row .fetch-models-button {
+  min-height: 36px;
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+.model-list-hint {
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .chat-option[hidden],
@@ -798,6 +867,14 @@ main {
 
   .field.full {
     grid-column: auto;
+  }
+
+  .model-picker-row {
+    grid-template-columns: 1fr;
+  }
+
+  .model-picker-row .fetch-models-button {
+    width: 100%;
   }
 
   .upstream-toggle {

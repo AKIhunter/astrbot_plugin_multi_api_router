@@ -1,6 +1,7 @@
 import asyncio
 import types
 import unittest
+from unittest import mock
 
 import main as router_module
 
@@ -40,6 +41,57 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.providers.append(provider)
         return provider
 
+    async def test_large_base64_passes_text_budget_and_history_is_not_changed(self):
+        from test_image_budget import image, user
+        provider = self.build_provider({"max_input_chars": 1000, "upstream_1": upstream(1)})
+        original = [user(image(b"1" * 300000))]
+        seen = []
+
+        async def fake_call(_self, item, **kwargs):
+            seen.append(kwargs["contexts"])
+            return "ok"
+
+        provider._call_once = types.MethodType(fake_call, provider)
+        self.assertEqual(await provider.text_chat(contexts=original), "ok")
+        self.assertEqual(seen[0], original)
+        self.assertEqual(original[0]["content"][0]["type"], "image_url")
+
+    async def test_text_and_tool_budget_reject_before_upstream(self):
+        from astrbot.core.agent.tool import ToolSet, FunctionTool
+        provider = self.build_provider({"max_input_chars": 1000, "upstream_1": upstream(1)})
+        with mock.patch.object(provider, "_call_once", new_callable=mock.AsyncMock) as call:
+            for kwargs in ({"prompt": "x" * 1001},
+                           {"prompt": "你好", "func_tool": ToolSet([
+                               FunctionTool(name="fixture", description="x" * 1001, parameters={})
+                           ])}):
+                with self.subTest(kwargs=list(kwargs)):
+                    with self.assertRaisesRegex(ValueError, "字符数"):
+                        await provider.text_chat(**kwargs)
+            call.assert_not_called()
+
+    async def test_compaction_reaches_upstream_without_changing_input(self):
+        from test_image_budget import image, user
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        original = [user(image()) for _ in range(5)]
+        seen = []
+
+        async def fake_call(_self, item, **kwargs):
+            seen.append(kwargs["contexts"])
+            return "ok"
+
+        provider._call_once = types.MethodType(fake_call, provider)
+        await provider.text_chat(contexts=original)
+        self.assertEqual(seen[0][0]["content"][0]["type"], "text")
+        self.assertEqual(original[0]["content"][0]["type"], "image_url")
+
+    async def test_oversized_current_image_rejected_before_upstream(self):
+        from test_image_budget import image
+        provider = self.build_provider({"max_image_bytes": 1024, "upstream_1": upstream(1)})
+        with mock.patch.object(provider, "_call_once", new_callable=mock.AsyncMock) as call:
+            with self.assertRaisesRegex(ValueError, "单张"):
+                await provider.text_chat(prompt="看图", image_urls=[image(b"x" * 1025)["image_url"]["url"]])
+            call.assert_not_called()
+
     async def asyncTearDown(self):
         for provider in self.providers:
             for item in provider._all_upstreams:
@@ -66,6 +118,274 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "second response")
         self.assertEqual(calls, [1, 2])
+
+    async def test_failed_requests_do_not_freeze_later_requests(self):
+        provider = self.build_provider({
+            "failure_threshold": 2,
+            "cooldown_seconds": 300,
+            "upstream_1": upstream(1),
+        })
+        item = provider.upstreams[0]
+        with mock.patch.object(
+            provider, "_call_once",
+            side_effect=[TimeoutError(), TimeoutError(), "recovered"],
+        ) as call:
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "路由失败"):
+                    await provider.text_chat(prompt="fixture")
+            self.assertEqual(item.consecutive_failures, 2)
+            self.assertEqual(item.circuit_open_until, 0)
+            # 即使旧实例残留未来的熔断截止时间，也不能挡住新请求。
+            item.circuit_open_until = router_module.time.monotonic() + 300
+            self.assertTrue(item.available(router_module.time.monotonic()))
+            self.assertEqual(await provider.text_chat(prompt="fixture"), "recovered")
+            self.assertEqual(call.await_count, 3)
+        self.assertEqual(item.consecutive_failures, 0)
+        self.assertEqual(provider.cooldown_seconds, 0)
+
+    async def test_transient_error_retries_same_input_once(self):
+        import httpx
+        from openai import InternalServerError
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        client = provider.upstreams[0].client
+        payload = {"model": "model-1", "messages": [{"role": "user", "content": "fixture"}],
+                   "custom_field": {"same_input": True}}
+        seen = []
+        failure = InternalServerError(
+            "fixture failure", response=httpx.Response(502, request=httpx.Request(
+                "POST", "https://example.invalid/v1/chat/completions")), body=None,
+        )
+
+        async def query(request_payload, tools, **kwargs):
+            self.assertEqual(kwargs["request_max_retries"], 1)
+            self.assertEqual(kwargs["conversation_id"], "fixture-conversation")
+            seen.append(request_payload.pop("custom_field"))
+            if len(seen) == 1:
+                request_payload["messages"].clear()
+                raise failure
+            self.assertEqual(request_payload["messages"], payload["messages"])
+            return "recovered"
+
+        with mock.patch.object(client, "_prepare_chat_payload",
+                               return_value=(payload, [])), \
+             mock.patch.object(client, "_query", side_effect=query) as call, \
+             mock.patch.object(router_module.asyncio, "sleep",
+                               new_callable=mock.AsyncMock) as sleep:
+            self.assertEqual(await provider.text_chat(
+                prompt="fixture", conversation_id="fixture-conversation",
+            ), "recovered")
+            self.assertEqual(call.await_count, 2)
+            sleep.assert_awaited_once_with(1.0)
+        self.assertEqual(seen, [{"same_input": True}, {"same_input": True}])
+        self.assertEqual(len(payload["messages"]), 1)
+
+    async def test_temporary_errors_exhaust_two_attempts_then_next_request_can_recover(self):
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        client = provider.upstreams[0].client
+        with mock.patch.object(client, "_prepare_chat_payload",
+                               return_value=({"model": "model-1"}, [])), \
+             mock.patch.object(client, "_query",
+                               side_effect=[TimeoutError(), TimeoutError(), "next response"]) as call, \
+             mock.patch.object(router_module.asyncio, "sleep",
+                               new_callable=mock.AsyncMock) as sleep:
+            with self.assertRaisesRegex(RuntimeError, "路由失败"):
+                await provider.text_chat(prompt="fixture")
+            self.assertEqual(call.await_count, 2)
+            self.assertEqual(await provider.text_chat(prompt="fixture"), "next response")
+            self.assertEqual(call.await_count, 3)
+            sleep.assert_awaited_once()
+
+    async def test_rejected_requests_are_not_retried_in_place(self):
+        import httpx
+        from openai import APIStatusError
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        client = provider.upstreams[0].client
+        for status in (400, 401, 403, 404, 422, 429):
+            with self.subTest(status=status):
+                error = APIStatusError(
+                    "fixture rejection", response=httpx.Response(
+                        status, request=httpx.Request("POST", "https://example.invalid/v1")),
+                    body=None,
+                )
+                with mock.patch.object(client, "_prepare_chat_payload",
+                                       return_value=({"model": "model-1"}, [])), \
+                     mock.patch.object(client, "_query", side_effect=error) as call, \
+                     mock.patch.object(router_module.asyncio, "sleep",
+                                       new_callable=mock.AsyncMock) as sleep:
+                    with self.assertRaisesRegex(RuntimeError, "路由失败"):
+                        await provider.text_chat(prompt="fixture")
+                    call.assert_awaited_once()
+                    sleep.assert_not_awaited()
+
+    async def test_retry_wait_is_cancelled_at_route_deadline(self):
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        provider.route_timeout_seconds = 0.02
+        capacity = provider._semaphore._value
+        client = provider.upstreams[0].client
+        with mock.patch.object(client, "_prepare_chat_payload",
+                               return_value=({"model": "model-1"}, [])), \
+             mock.patch.object(client, "_query", side_effect=TimeoutError()) as call:
+            with self.assertRaisesRegex(RuntimeError, "超过总时限"):
+                await provider.text_chat(prompt="fixture")
+            call.assert_awaited_once()
+        self.assertEqual(provider._semaphore._value, capacity)
+
+    async def test_pinned_provider_queue_has_total_deadline(self):
+        provider = self.build_provider({
+            "id": f"{router_module.PINNED_PROVIDER_PREFIX}1",
+            "upstream_1": upstream(1),
+        })
+        provider.route_timeout_seconds = 0.02
+        provider._semaphore = asyncio.Semaphore(0)
+        with mock.patch.object(provider, "_call_once") as call:
+            with self.assertRaisesRegex(RuntimeError, "超过总时限"):
+                await provider.text_chat(prompt="fixture")
+            call.assert_not_awaited()
+
+    async def test_transient_health_failure_does_not_block_real_request(self):
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        for status in (None, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                provider.health_lookup = lambda _slot: {
+                    "ok": False, "checked_at": int(router_module.time.time()),
+                    "http_status": status, "status": "fixture temporary failure",
+                }
+                with mock.patch.object(provider, "_call_once", return_value="ok") as call:
+                    self.assertEqual(await provider.text_chat(prompt="fixture"), "ok")
+                    call.assert_awaited_once()
+        provider.health_lookup = lambda _slot: {
+            "ok": False, "checked_at": int(router_module.time.time()),
+            "http_status": 401, "status": "fixture authentication failure",
+        }
+        with mock.patch.object(provider, "_call_once") as call:
+            with self.assertRaisesRegex(RuntimeError, "没有可调用的上游"):
+                await provider.text_chat(prompt="fixture")
+            call.assert_not_awaited()
+
+    def test_legacy_circuit_settings_cannot_reenable_freezing(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"failure_threshold": 2, "cooldown_seconds": 300}
+        self.assertEqual(plugin._coerce_global_int("failure_threshold", 2), 0)
+        self.assertEqual(plugin._coerce_global_int("cooldown_seconds", 300), 0)
+        provider = self.build_provider({"upstream_1": upstream(1)})
+        plugin.router = provider
+        strategy = plugin._strategy_data()
+        self.assertFalse(strategy["circuit_breaker_enabled"])
+        self.assertEqual(strategy["upstream_max_attempts"], 2)
+        self.assertIn("不按连续失败冻结接口", strategy["summary"])
+
+    async def test_configured_retry_count_interval_and_disabled_retries(self):
+        for count, interval in ((0, 0), (3, 0.75), (5, 3600)):
+            with self.subTest(count=count, interval=interval):
+                provider = self.build_provider({
+                    "upstream_1": upstream(1),
+                    "upstream_retry_count": count,
+                    "retry_interval_seconds": interval,
+                })
+                client = provider.upstreams[0].client
+                with mock.patch.object(client, "_prepare_chat_payload",
+                                       return_value=({"model": "model-1"}, [])), \
+                     mock.patch.object(client, "_query", side_effect=TimeoutError()) as call, \
+                     mock.patch.object(router_module.asyncio, "sleep",
+                                       new_callable=mock.AsyncMock) as sleep:
+                    with self.assertRaisesRegex(RuntimeError, "路由失败"):
+                        await provider.text_chat(prompt="fixture")
+                    self.assertEqual(call.await_count, count + 1)
+                    self.assertEqual(sleep.await_args_list, [mock.call(interval)] * count)
+
+    async def test_fractional_retry_settings_save_read_and_reload(self):
+        from copy import deepcopy
+
+        class Config(dict):
+            def save_config(self):
+                self.saved = deepcopy(dict(self))
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({
+            "upstream_1": upstream(1), "max_concurrency": 7,
+            "max_output_tokens": 1234, "fallback_to_main_model": False,
+        })
+        plugin._health_results = {}
+        plugin.router = self.build_provider(dict(plugin.config))
+        updates = {"request_timeout_seconds": "60", "max_attempts": "4",
+                   "upstream_retry_count": "3", "retry_interval_seconds": "0.75"}
+
+        async def reload_fixture():
+            # 使用真正的 Provider 构造，替代宿主注册和其它插件自动绑定。
+            plugin.router = self.build_provider(dict(plugin.config))
+
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(json=mock.AsyncMock(
+                                   return_value={"global": updates}))), \
+             mock.patch.object(router_module, "json_response", side_effect=lambda data: data), \
+             mock.patch.object(plugin, "_reload_router", side_effect=reload_fixture) as reload:
+            result = await plugin.api_save_upstreams()
+            self.assertTrue(result["ok"])
+            reload.assert_awaited_once()
+            loaded = await plugin.api_upstreams_config()
+
+        for key, value in (("request_timeout_seconds", 60), ("max_attempts", 4),
+                           ("upstream_retry_count", 3), ("retry_interval_seconds", 0.75)):
+            self.assertEqual(plugin.config.saved[key], value)
+            self.assertEqual(loaded["global"][key], value)
+            self.assertEqual(getattr(plugin.router, key), value)
+            self.assertEqual(loaded["strategy"][key], value)
+        self.assertEqual(plugin.router.upstreams[0].client.client.timeout, 60)
+        self.assertEqual(loaded["strategy"]["upstream_max_attempts"], 4)
+        self.assertIn("间隔 0.75s", loaded["strategy"]["summary"])
+        self.assertIn("重试间隔 0.75s", "\n".join(plugin.router.status_lines()))
+        self.assertEqual(plugin.config.saved["max_concurrency"], 7)
+        self.assertEqual(plugin.config.saved["max_output_tokens"], 1234)
+        self.assertEqual(plugin.config.saved["upstream_1"], upstream(1))
+
+    async def test_invalid_retry_settings_do_not_mutate_or_save(self):
+        invalid = {
+            "upstream_retry_count": (-1, 6, 1.5, "", None, True, "nan"),
+            "retry_interval_seconds": (-0.1, 3601, "", None, False, "nan", "inf"),
+            "request_timeout_seconds": (4, 601, 5.5),
+            "max_attempts": (0, 6, 1.5),
+        }
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    plugin = object.__new__(router_module.MultiApiRouterPlugin)
+                    plugin.config = {"upstream_1": upstream(1), "upstream_retry_count": 1}
+                    original = dict(plugin.config)
+                    plugin._health_results = {1: {"ok": True}}
+                    with mock.patch.object(router_module, "request", types.SimpleNamespace(
+                        json=mock.AsyncMock(return_value={
+                            "global": {"provider_id": "changed", key: value},
+                            "delete_slots": [1],
+                        })
+                    )), mock.patch.object(
+                        router_module, "error_response",
+                        side_effect=lambda message, status_code: (message, status_code),
+                    ), mock.patch.object(plugin, "_reload_router") as reload:
+                        message, status = await plugin.api_save_upstreams()
+                    self.assertEqual(status, 400)
+                    self.assertIn(key, message)
+                    self.assertEqual(plugin.config, original)
+                    self.assertEqual(plugin._health_results, {1: {"ok": True}})
+                    reload.assert_not_awaited()
+
+    async def test_disabled_plugin_still_exposes_default_retry_settings(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {}
+        plugin.router = None
+        plugin._health_results = {}
+        with mock.patch.object(router_module, "json_response", side_effect=lambda data: data):
+            loaded = await plugin.api_upstreams_config()
+        self.assertEqual(loaded["global"]["upstream_retry_count"], 1)
+        self.assertEqual(loaded["global"]["retry_interval_seconds"], 1.0)
+
+    def test_startup_handles_old_or_malformed_retry_config(self):
+        for value, expected in ((None, 1.0), ("nan", 1.0), ("bad", 1.0),
+                                (-2, 0), (4000, 3600), ("0.75", 0.75)):
+            with self.subTest(value=value):
+                provider = self.build_provider({
+                    "upstream_1": upstream(1), "retry_interval_seconds": value,
+                })
+                self.assertEqual(provider.retry_interval_seconds, expected)
 
     async def test_route_timeout_stops_remaining_upstreams(self):
         provider = self.build_provider(
@@ -224,6 +544,54 @@ class FakeProbeClient:
 
 
 class TypedProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gpt_image_probe_uses_supported_square_size(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        for model, expected_size in (
+            ("gpt-image-2.6-flare", "1024x1024"),
+            ("qwen-image-3.0", "256x256"),
+        ):
+            with self.subTest(model=model):
+                client = FakeProbeClient()
+                await plugin._execute_typed_probe(
+                    client, api_type="image_generation", model=model
+                )
+                self.assertEqual(client.image_endpoint.calls[0]["size"], expected_size)
+                self.assertEqual(client.image_endpoint.calls[0]["n"], 1)
+
+    async def test_image_probe_has_longer_timeout_than_chat(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        for api_type, expected_timeout in (("image_generation", 60), ("chat", 15)):
+            with self.subTest(api_type=api_type):
+                plugin.config = {
+                    "health_check_timeout_seconds": 15,
+                    "upstream_10": upstream(10, api_type=api_type),
+                }
+                client = FakeProbeClient()
+                client.close = mock.AsyncMock()
+                with mock.patch.object(router_module, "AsyncOpenAI", return_value=client) as factory:
+                    result = await plugin._probe_upstream(10)
+                self.assertTrue(result["ok"])
+                self.assertEqual(factory.call_args.kwargs["timeout"], expected_timeout)
+                self.assertEqual(factory.call_args.kwargs["max_retries"], 0)
+                client.close.assert_awaited_once()
+
+    async def test_sdk_timeout_is_reported_as_timeout(self):
+        import httpx
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_10": upstream(10)}
+        client = FakeProbeClient()
+        client.close = mock.AsyncMock()
+        error = router_module.APITimeoutError(
+            request=httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        )
+        with mock.patch.object(router_module, "AsyncOpenAI", return_value=client):
+            with mock.patch.object(plugin, "_execute_typed_probe", side_effect=error):
+                result = await plugin._probe_upstream(10)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "请求超时")
+        self.assertEqual(result["error_type"], "APITimeoutError")
+        client.close.assert_awaited_once()
+
     async def test_each_category_uses_its_own_protocol(self):
         plugin = object.__new__(router_module.MultiApiRouterPlugin)
         expected_protocols = {
@@ -262,6 +630,63 @@ class TypedProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(content, str)
         self.assertIn("图转文", protocol)
 
+    async def test_model_list_normalizes_base_deduplicates_and_sorts(self):
+        class FakeModels:
+            async def list(self):
+                return types.SimpleNamespace(
+                    data=[
+                        types.SimpleNamespace(id="z-model"),
+                        types.SimpleNamespace(id="A-model"),
+                        types.SimpleNamespace(id="z-model"),
+                        types.SimpleNamespace(id=""),
+                    ]
+                )
+
+        class FakeClient:
+            created = []
+
+            def __init__(self, **kwargs):
+                self.models = FakeModels()
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.created.append(self)
+
+            async def close(self):
+                self.closed = True
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"health_check_timeout_seconds": 15}
+        normalized = plugin._normalize_model_api_base(
+            "https://example.invalid/v1/models/"
+        )
+        with mock.patch.object(router_module, "AsyncOpenAI", FakeClient):
+            models, truncated = await plugin._fetch_visible_models(
+                normalized,
+                "test-key",
+            )
+
+        self.assertEqual(normalized, "https://example.invalid/v1")
+        self.assertEqual(models, ["A-model", "z-model"])
+        self.assertFalse(truncated)
+        self.assertEqual(
+            FakeClient.created[0].kwargs["base_url"],
+            "https://example.invalid/v1",
+        )
+        self.assertTrue(FakeClient.created[0].closed)
+
+    def test_model_list_rejects_unsafe_or_invalid_base_urls(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        for value in (
+            "",
+            "example.invalid/v1",
+            "ftp://example.invalid/v1",
+            "https://user:pass@example.invalid/v1",
+            "https://example.invalid/v1?token=secret",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    plugin._normalize_model_api_base(value)
+
 
 class ProviderRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_disabled_chat_api_keeps_direct_provider(self):
@@ -269,6 +694,7 @@ class ProviderRegistrationTests(unittest.IsolatedAsyncioTestCase):
             inst_map={},
             provider_insts=[],
             providers_config=[],
+            provider_sources_config=[],
         )
 
         def register_provider(provider):
@@ -310,6 +736,21 @@ class ProviderRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 [item.slot for item in plugin.router._all_upstreams],
                 [1, 2],
             )
+            self.assertEqual(
+                {row["id"] for row in manager.provider_sources_config},
+                {"多 API 路由（自动）", "api-1", "api-2"},
+            )
+            source_ids = {row["id"] for row in manager.provider_sources_config}
+            self.assertTrue(all(
+                row["provider_source_id"] in source_ids
+                for row in manager.providers_config
+            ))
+            # 保存后的热重载不能累加重复 source 或改变现有名称。
+            await plugin._install_router_providers()
+            self.assertEqual(
+                {row["id"] for row in manager.provider_sources_config}, source_ids
+            )
+            self.assertEqual(len(manager.provider_sources_config), 3)
         finally:
             for provider in plugin._router_instances:
                 await plugin._close_router_instance(provider)

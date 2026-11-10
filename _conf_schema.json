@@ -16,12 +16,12 @@
     "default": 45,
     "slider": {
       "min": 5,
-      "max": 180,
+      "max": 600,
       "step": 5
     }
   },
   "route_timeout_seconds": {
-    "description": "自动路由总超时限制（秒）",
+    "description": "单次路由总超时限制（秒）",
     "type": "int",
     "default": 90,
     "slider": {
@@ -29,7 +29,7 @@
       "max": 600,
       "step": 5
     },
-    "hint": "覆盖并发排队、逐个上游尝试和主模型回退；达到总时限后停止后续调用。指定单个上游时仍使用单上游请求超时。"
+    "hint": "覆盖并发排队、上游重试、逐个上游尝试和主模型回退；达到总时限后停止后续调用。指定单个上游也受总时限约束。"
   },
   "max_attempts": {
     "description": "单次请求最多尝试几个上游",
@@ -40,27 +40,20 @@
       "max": 5,
       "step": 1
     },
-    "hint": "每个上游只请求一次；此值限制最坏情况下的调用次数。"
+    "hint": "限制候选上游数量，不是同一上游的重试次数。所有尝试和重试等待共用总时限。"
   },
-  "failure_threshold": {
-    "description": "连续失败多少次后熔断",
+  "upstream_retry_count": {
+    "description": "每个上游异常重试次数",
     "type": "int",
-    "default": 2,
-    "slider": {
-      "min": 1,
-      "max": 10,
-      "step": 1
-    }
+    "default": 1,
+    "slider": {"min": 0, "max": 5, "step": 1},
+    "hint": "首次调用不计入重试次数，0 表示不重试。仅超时、连接错误、HTTP 408 和 5xx 原地重试。"
   },
-  "cooldown_seconds": {
-    "description": "熔断冷却时间（秒）",
-    "type": "int",
-    "default": 300,
-    "slider": {
-      "min": 30,
-      "max": 3600,
-      "step": 30
-    }
+  "retry_interval_seconds": {
+    "description": "异常重试间隔（秒）",
+    "type": "float",
+    "default": 1.0,
+    "hint": "范围 0–3600 秒，支持小数；只暂停本轮请求后再重试该上游，不冻结新请求。等待计入路由总时限。"
   },
   "max_concurrency": {
     "description": "路由器最大并发请求数",
@@ -73,10 +66,34 @@
     }
   },
   "max_input_chars": {
-    "description": "单次请求最大输入字符数",
+    "description": "单次请求最大文字输入字符数",
     "type": "int",
     "default": 262144,
-    "hint": "默认 262144（256 Ki 字符）。超出后直接拒绝，不调用任何上游。字符数是跨模型通用预算。"
+    "hint": "统计文字、工具定义及工具结果，图片内容块的Base64另计体积。范围1000–2000000；不是模型Token上限。"
+  },
+  "max_image_bytes": {
+    "description": "单张图片最大字节数",
+    "type": "int",
+    "default": 8388608,
+    "hint": "内联/本地图片解码后最多8 MiB；可设置1024–67108864。远程URL不额外下载计量。"
+  },
+  "max_total_image_bytes": {
+    "description": "单次请求图片合计最大字节数",
+    "type": "int",
+    "default": 33554432,
+    "hint": "内联/本地图片合计默认32 MiB；范围1024–134217728。"
+  },
+  "max_image_count": {
+    "description": "单次请求最多图片数",
+    "type": "int",
+    "default": 32,
+    "hint": "包括当前、历史和工具结果中的图片，范围1–128。"
+  },
+  "history_image_compaction_enabled": {
+    "description": "旧历史图片用观察和占位替代",
+    "type": "bool",
+    "default": true,
+    "hint": "仅压缩发送副本，原始历史不改。保留最近2个历史用户轮次内最多4张原图，当前用户图片不裁剪。"
   },
   "max_output_tokens": {
     "description": "单次请求最大输出 Token",
@@ -96,7 +113,7 @@
     "hint": "检测请求不重试，也不会改变业务熔断计数。"
   },
   "skip_unhealthy_upstreams": {
-    "description": "健康检查不通时跳过该上游",
+    "description": "自动路由跳过已确认的配置错误",
     "type": "bool",
     "default": true,
     "hint": "检测明确失败的上游在有效期内会被跳过并写日志；不会删除上游。"

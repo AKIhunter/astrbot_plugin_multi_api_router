@@ -40,6 +40,39 @@ const GLOBAL_FIELDS = [
     max: 600,
   },
   {
+    key: "request_timeout_seconds",
+    label: "单次接口超时（秒）",
+    type: "number",
+    min: 5,
+    max: 600,
+    hint: "每次调用同一上游的超时限制。",
+  },
+  {
+    key: "max_attempts",
+    label: "最多尝试的上游数量",
+    type: "number",
+    min: 1,
+    max: 5,
+    hint: "自动路由最多尝试几个上游。",
+  },
+  {
+    key: "upstream_retry_count",
+    label: "每个上游异常重试次数",
+    type: "number",
+    min: 0,
+    max: 5,
+    hint: "不含首次调用；0 表示不重试。",
+  },
+  {
+    key: "retry_interval_seconds",
+    label: "异常重试间隔（秒）",
+    type: "number",
+    min: 0,
+    max: 3600,
+    step: "any",
+    hint: "支持小数；只暂停本轮重试，等待计入路由总时限。",
+  },
+  {
     key: "max_input_chars",
     label: "单次请求最大输入字符数",
     type: "number",
@@ -48,7 +81,7 @@ const GLOBAL_FIELDS = [
   },
   { key: "fallback_to_main_model", label: "真实调用失败后回退主模型", type: "checkbox" },
   { key: "fallback_provider_id", label: "回退 Provider ID（留空用默认主模型）", type: "text" },
-  { key: "skip_unhealthy_upstreams", label: "跳过健康检查不通的上游", type: "checkbox" },
+  { key: "skip_unhealthy_upstreams", label: "自动跳过已确认的配置错误", type: "checkbox" },
 ];
 
 function escapeText(value) {
@@ -79,6 +112,13 @@ function visibleUpstreams() {
   return state.upstreams
     .filter((item) => item.route_enabled || item.configured || addedSlots.has(item.slot))
     .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || a.slot - b.slot);
+}
+
+function upstreamLabel(slot) {
+  // 提示使用当前页面顺序；固定 slot 只用于请求定位，拖拽后两者可能不同。
+  const index = Array.from(list.querySelectorAll(".upstream"))
+    .findIndex((article) => Number(article.dataset.slot) === Number(slot));
+  return index >= 0 ? `上游 ${index + 1}` : "该上游";
 }
 
 function nextPriority() {
@@ -202,10 +242,25 @@ function renderGlobalFields() {
     const input = document.createElement("input");
     input.type = spec.type;
     input.dataset.globalKey = spec.key;
+    input.id = `global-${spec.key}`;
+    span.id = `${input.id}-label`;
+    input.setAttribute("aria-labelledby", span.id);
     input.value = state.global[spec.key] ?? "";
     if (spec.min !== undefined) { input.min = spec.min; input.max = spec.max; }
+    if (spec.type === "number") {
+      input.step = spec.step ?? 1;
+      input.required = true;
+    }
     input.addEventListener("input", markDirty);
     label.append(span, input);
+    if (spec.hint) {
+      const hint = document.createElement("small");
+      hint.className = "field-hint";
+      hint.id = `${input.id}-hint`;
+      hint.textContent = spec.hint;
+      input.setAttribute("aria-describedby", hint.id);
+      label.append(hint);
+    }
     globalFields.appendChild(label);
   }
 }
@@ -322,7 +377,14 @@ function render() {
     fragment.querySelector(".name").value = escapeText(upstream.name);
     fragment.querySelector(".api-base").value = escapeText(upstream.api_base);
     fragment.querySelector(".api-key").value = escapeText(upstream.api_key || "");
-    fragment.querySelector(".model").value = escapeText(upstream.model);
+    const modelInput = fragment.querySelector(".model");
+    const modelOptions = fragment.querySelector(".model-options");
+    const modelListHint = fragment.querySelector(".model-list-hint");
+    const fetchModelsButton = fragment.querySelector(".fetch-models-button");
+    const modelListId = `model-options-${upstream.slot}`;
+    modelOptions.id = modelListId;
+    modelInput.setAttribute("list", modelListId);
+    modelInput.value = escapeText(upstream.model);
     fragment.querySelector(".tools").checked = Boolean(upstream.supports_tools);
     fragment.querySelector(".thinking").checked = Boolean(upstream.enable_thinking);
     const apiTypeSelect = fragment.querySelector(".api-type");
@@ -358,6 +420,49 @@ function render() {
       markDirty();
     });
     applyTypeUi();
+
+    fetchModelsButton.addEventListener("click", async () => {
+      const apiBase = article.querySelector(".api-base").value.trim();
+      const apiKey = article.querySelector(".api-key").value.trim();
+      if (!apiBase || !apiKey) {
+        showToast(`${upstreamLabel(upstream.slot)} 请先填写 API Base 和 API Key`, true);
+        return;
+      }
+      fetchModelsButton.disabled = true;
+      fetchModelsButton.textContent = "获取中…";
+      modelListHint.textContent = "正在读取模型列表";
+      try {
+        const response = await bridge.apiPost("upstreams/models", {
+          api_base: apiBase,
+          api_key: apiKey,
+        });
+        modelOptions.replaceChildren(
+          ...response.models.map((model) => {
+            const option = document.createElement("option");
+            option.value = model;
+            return option;
+          }),
+        );
+        const suffix = response.truncated ? "，仅显示前 500 个" : "";
+        modelListHint.textContent = response.count
+          ? `已获取 ${response.count} 个模型${suffix}；点击输入框选择`
+          : "接口返回成功，但没有可选择的模型";
+        showToast(
+          response.count
+            ? `${upstreamLabel(upstream.slot)} 已获取 ${response.count} 个模型`
+            : `${upstreamLabel(upstream.slot)} 未返回模型`,
+          response.count === 0,
+        );
+        modelInput.focus();
+      } catch (error) {
+        modelOptions.replaceChildren();
+        modelListHint.textContent = "";
+        showToast(`${upstreamLabel(upstream.slot)}：${error.message || "获取模型列表失败"}`, true);
+      } finally {
+        fetchModelsButton.disabled = false;
+        fetchModelsButton.textContent = "获取模型";
+      }
+    });
 
     const status = fragment.querySelector(".health-status");
     const detail = fragment.querySelector(".health-detail");
@@ -471,12 +576,12 @@ async function checkUpstream(slot, ...buttons) {
     render();
     showToast(
       response.result.ok
-        ? `上游 ${slot} 检测正常`
-        : `上游 ${slot}：${response.result.status}`,
+        ? `${upstreamLabel(slot)} 检测正常`
+        : `${upstreamLabel(slot)}：${response.result.status}`,
       !response.result.ok,
     );
   } catch (error) {
-    showToast(error.message || "检测失败", true);
+    showToast(`${upstreamLabel(slot)}：${error.message || "检测失败"}`, true);
     await load();
   }
 }
@@ -541,7 +646,7 @@ function deleteUpstream(slot) {
   const index = state.upstreams.findIndex((item) => item.slot === slot);
   if (index < 0) return;
   const item = state.upstreams[index];
-  const label = item.name || `#${slot}`;
+  const label = item.name || upstreamLabel(slot);
   confirmDialog(`确定删除上游「${label}」吗？此操作需点击「保存全部」后生效。`).then(
     (ok) => {
       if (!ok) return;
@@ -623,6 +728,15 @@ function collectPayload() {
 async function save() {
   const button = document.querySelector("#save-button");
   const bottomButton = document.querySelector("#save-bottom-button");
+  // 自定义保存按钮不触发表单原生校验，主动拦截越界、空值和非整数。
+  for (const input of globalFields.querySelectorAll('input[type="number"]')) {
+    if (!input.checkValidity()) {
+      const spec = GLOBAL_FIELDS.find((field) => field.key === input.dataset.globalKey);
+      showToast(`${spec.label}：请输入 ${spec.min}–${spec.max} 范围内的${input.step === "any" ? "数字" : "整数"}`, true);
+      input.reportValidity();
+      return;
+    }
+  }
   const payload = collectPayload();
   // 保存前前端完整性校验：启用但配置不完整时直接拦截，给友好提示。
   for (const key of Object.keys(payload)) {
@@ -630,7 +744,7 @@ async function save() {
     const slot = key.slice("upstream_".length);
     const item = payload[key];
     if (item.route_enabled && (!item.api_base || !item.api_key || !item.model)) {
-      showToast(`上游 ${slot} 已启用路由但缺少 ${!item.api_base ? "API Base" : !item.api_key ? "API Key" : "模型 ID"}，无法保存`, true);
+      showToast(`${upstreamLabel(slot)} 已启用路由但缺少 ${!item.api_base ? "API Base" : !item.api_key ? "API Key" : "模型 ID"}，无法保存`, true);
       return;
     }
   }
