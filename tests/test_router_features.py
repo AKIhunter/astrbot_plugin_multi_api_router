@@ -203,7 +203,8 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         from openai import APIStatusError
         provider = self.build_provider({"upstream_1": upstream(1)})
         client = provider.upstreams[0].client
-        for status in (400, 401, 403, 404, 422, 429):
+        # 429 已归入 retry_then_rotate，不再属于“拒绝即切换”；配额类 429 单独用例覆盖。
+        for status in (400, 401, 402, 403, 404, 422):
             with self.subTest(status=status):
                 error = APIStatusError(
                     "fixture rejection", response=httpx.Response(
@@ -418,6 +419,48 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin.config.saved["max_concurrency"], 7)
         self.assertEqual(plugin.config.saved["max_output_tokens"], 1234)
         self.assertEqual(plugin.config.saved["upstream_1"], upstream(1))
+
+    async def test_provider_id_is_locked_and_ignores_overrides(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = dict(self)
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({
+            "provider_id": router_module.PROVIDER_TYPE,
+            "upstream_1": upstream(1),
+        })
+        plugin._health_results = {}
+        plugin.router = self.build_provider(dict(plugin.config))
+
+        async def reload_fixture():
+            plugin.router = self.build_provider(dict(plugin.config))
+
+        with mock.patch.object(router_module, "request",
+                               types.SimpleNamespace(json=mock.AsyncMock(
+                                   return_value={"global": {"provider_id": "evil_router"}}))), \
+             mock.patch.object(router_module, "json_response", side_effect=lambda data: data), \
+             mock.patch.object(plugin, "_reload_router", side_effect=reload_fixture):
+            result = await plugin.api_save_upstreams()
+            self.assertTrue(result["ok"])
+            loaded = await plugin.api_upstreams_config()
+
+        self.assertEqual(plugin.config["provider_id"], router_module.PROVIDER_TYPE)
+        self.assertEqual(loaded["global"]["provider_id"], router_module.PROVIDER_TYPE)
+        self.assertEqual(plugin.router.meta().id, router_module.PROVIDER_TYPE)
+        # 构造参数里的 provider_id 也不能覆盖整体 ID。
+        overridden = self.build_provider({
+            "provider_id": "evil_router",
+            "upstream_1": upstream(1),
+        })
+        self.assertEqual(overridden.meta().id, router_module.PROVIDER_TYPE)
+        # 指定上游实例仍按槽位号生成独立 ID。
+        pinned = router_module.MultiApiRouterProvider({
+            "provider_id": "evil_router",
+            "upstream_slot": 3,
+            "upstream_3": upstream(3),
+        })
+        self.assertEqual(pinned.meta().id, f"{router_module.PINNED_PROVIDER_PREFIX}3")
 
     async def test_invalid_retry_settings_do_not_mutate_or_save(self):
         invalid = {

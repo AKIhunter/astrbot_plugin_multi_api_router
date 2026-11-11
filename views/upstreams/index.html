@@ -147,6 +147,7 @@
           <section>
             <h3>整体模式 Provider ID</h3>
             <p>其他插件选择 <code>multi_api_router</code> 后，会按右侧从上到下的顺序尝试已启用路由的聊天兼容 API。任一 API 返回响应后立即停止，不再调用后续 API。</p>
+            <p>该 ID 已锁定为只读：它是所有下游插件引用路由的固定标识，修改会导致它们找不到 Provider。</p>
           </section>
           <section>
             <h3>启用路由 Provider</h3>
@@ -239,6 +240,6 @@
     </div>
 
     <div class="toast" id="toast" hidden></div>
-    <script type="module" src="./app.js?v=slot-retire-20261111"></script>
+    <script type="module" src="./app.js?v=provider-lock-20261111"></script>
   </body>
 </html>

@@ -31,7 +31,12 @@ const CHAT_COMPATIBLE_TYPES = new Set(["chat", "image_to_text", "multimodal"]);
 // 页面只保留需要经常改的策略项；并发和输出预算等仍在 AstrBot 插件配置里。
 const GLOBAL_FIELDS = [
   { key: "enabled", label: "启用路由 Provider", type: "checkbox" },
-  { key: "provider_id", label: "整体模式 Provider ID", type: "text" },
+  {
+    key: "provider_id",
+    label: "整体模式 Provider ID（固定，不可修改）",
+    type: "readonly",
+    hint: "这是所有下游插件（BiliBot、AB 档案等）引用路由的固定 ID，改名会让它们找不到 Provider，因此锁定为 multi_api_router。",
+  },
   {
     key: "route_timeout_seconds",
     label: "路由超时限制（秒）",
@@ -239,6 +244,29 @@ function renderGlobalFields() {
       input.checked = Boolean(state.global[spec.key]);
       input.addEventListener("change", markDirty);
       label.append(input, document.createTextNode(" " + spec.label));
+      globalFields.appendChild(label);
+      continue;
+    }
+    if (spec.type === "readonly") {
+      const label = document.createElement("label");
+      label.className = "field";
+      const span = document.createElement("span");
+      span.textContent = spec.label;
+      // 只读展示：不挂 data-global-key，保存时不会被收集，也不会写回后端。
+      const value = document.createElement("input");
+      value.type = "text";
+      value.value = state.global[spec.key] ?? "multi_api_router";
+      value.readOnly = true;
+      value.disabled = true;
+      value.id = `global-${spec.key}`;
+      span.id = `${value.id}-label`;
+      value.setAttribute("aria-labelledby", span.id);
+      const hint = document.createElement("small");
+      hint.className = "field-hint";
+      hint.id = `${value.id}-hint`;
+      hint.textContent = spec.hint;
+      value.setAttribute("aria-describedby", hint.id);
+      label.append(span, value, hint);
       globalFields.appendChild(label);
       continue;
     }

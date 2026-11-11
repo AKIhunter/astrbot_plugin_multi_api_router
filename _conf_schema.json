@@ -11,10 +11,11 @@
     "default": true
   },
   "provider_id": {
-    "description": "在 AstrBot 中显示的 Provider ID",
+    "description": "整体模式 Provider ID（固定为 multi_api_router，只读）",
     "type": "string",
     "default": "multi_api_router",
-    "hint": "其他插件选择模型时填写这个 ID。修改后需要重载插件或重启 AstrBot。"
+    "invisible": true,
+    "hint": "已锁定：该 ID 是所有下游插件（BiliBot、AB 档案等）引用路由的固定标识，改名会让它们找不到 Provider。运行时强制使用 multi_api_router，此值仅展示。"
   },
   "request_timeout_seconds": {
     "description": "每个上游的请求超时（秒）",

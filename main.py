@@ -6,11 +6,14 @@ import inspect
 import json
 import math
 import os
+import re
 import time
 import wave
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -43,6 +46,72 @@ PROVIDER_TYPE = "multi_api_router"
 PINNED_PROVIDER_PREFIX = f"{PROVIDER_TYPE}:upstream_"
 MAX_UPSTREAMS = 20
 MIN_UPSTREAMS = 5
+
+# 统一错误分类：重试、健康跳过、页面文案与失败记账都从这里取结论，
+# 禁止在各处再单独枚举状态码，避免 429 与 5xx 走出两套路径。
+DISPOSITION_RETRY = "retry_then_rotate"
+DISPOSITION_ROTATE = "rotate_now_report"
+DISPOSITION_IGNORE = "not_an_error"
+DISPOSITION_FAIL = "fail_report"
+
+CATEGORY_QUOTA = "quota_exhausted"
+CATEGORY_TIMEOUT = "timeout"
+CATEGORY_HTTP_5XX = "http_5xx"
+CATEGORY_CONNECTION = "connection_error"
+CATEGORY_HTTP_429 = "http_429"
+CATEGORY_AUTH = "authentication_error"
+CATEGORY_NOT_FOUND = "not_found"
+CATEGORY_INVALID_REQUEST = "invalid_request"
+CATEGORY_CLIENT = "client_error"
+CATEGORY_CONFIG = "configuration_error"
+CATEGORY_INTENTIONAL = "intentional"
+CATEGORY_UNKNOWN = "model_execution_error"
+
+# 429 也可能来自余额/额度耗尽；命中这些关键字时不再重试，直接切换并上报。
+QUOTA_KEYWORDS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "not enough quota",
+    "quota exceeded",
+    "insufficient balance",
+    "余额不足",
+    "额度不足",
+    "欠费",
+)
+# 撤回、上下文过期、策略变更与主动沉默都属预期结果，不计错误、不告警。
+INTENTIONAL_KEYWORDS = (
+    "message_recalled",
+    "message_expired",
+    "context_changed",
+    "stale_context",
+    "policy_changed",
+    "no_reply",
+    "intentional_silence",
+    "proactive_silence",
+    "superseded_by_new_message",
+)
+HEALTH_STATUS_LABELS = {
+    CATEGORY_QUOTA: "额度不足或欠费",
+    CATEGORY_AUTH: "认证失败",
+    CATEGORY_NOT_FOUND: "接口或模型不存在",
+    CATEGORY_HTTP_429: "限流或额度不足",
+    CATEGORY_HTTP_5XX: "服务端异常",
+    CATEGORY_TIMEOUT: "请求超时",
+    CATEGORY_CONNECTION: "连接或请求失败",
+    CATEGORY_INVALID_REQUEST: "请求参数或模型不兼容",
+    CATEGORY_CLIENT: "请求被上游拒绝",
+    CATEGORY_CONFIG: "配置不完整",
+}
+MODEL_LIST_ERROR_MESSAGES = {
+    CATEGORY_AUTH: "认证失败，请检查 API Key 或模型列表权限",
+    CATEGORY_QUOTA: "账户余额或额度不足，请充值或更换 API Key",
+    CATEGORY_NOT_FOUND: "该服务未提供 OpenAI 兼容的 /models 接口",
+    CATEGORY_HTTP_429: "请求过于频繁或额度受限，请稍后重试",
+    CATEGORY_HTTP_5XX: "上游服务暂时异常，请稍后重试",
+    CATEGORY_TIMEOUT: "获取模型列表超时，请检查 API Base 或稍后重试",
+    CATEGORY_CONNECTION: "无法连接上游，请检查 API Base 和网络连接",
+}
+DEFAULT_MODEL_LIST_ERROR = "无法获取模型列表，请检查 API Base 和网络连接"
 MAX_MODEL_OPTIONS = 500
 # 控制台接口默认只回显掩码：保留前缀与末 4 位，中间固定 ****。
 # 兼容开关 expose_plain_api_keys（默认关闭）可恢复旧行为。
@@ -101,6 +170,166 @@ class RetryBudgetExhausted(RuntimeError):
         self.last_error = last_error
 
 
+class RouterConfigError(RuntimeError):
+    """路由配置缺陷（无可用上游、指定上游缺失等），归类为 fail_report。"""
+
+
+def _error_status(error: object) -> int | None:
+    """从异常或健康结果字典里取 HTTP 状态码，取不到时返回 None。"""
+    if isinstance(error, Mapping):
+        raw = error.get("status_code", error.get("http_status"))
+    else:
+        raw = getattr(error, "status_code", None)
+        if raw is None:
+            raw = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _error_text(error: object) -> str:
+    """收集用于关键字判定的文本；解析失败时退回异常自身描述。"""
+    if isinstance(error, str):
+        return error
+    if isinstance(error, Mapping):
+        parts = [
+            str(error.get(key))
+            for key in ("message", "detail", "error", "body", "text", "status", "reason")
+            if error.get(key) not in (None, "")
+        ]
+        return " ".join(parts)
+    parts: list[str] = []
+    body = getattr(error, "body", None)
+    if body not in (None, ""):
+        try:
+            parts.append(json.dumps(body, ensure_ascii=False, default=str))
+        except Exception:
+            parts.append(str(body))
+    response = getattr(error, "response", None)
+    if response is not None:
+        try:
+            if response.text:
+                parts.append(response.text)
+        except Exception:
+            pass
+    try:
+        parts.append(str(error))
+    except Exception:
+        pass
+    return " ".join(parts)
+
+
+# 文案里的 HTTP 状态码只用于日志诊断：classify 仍只认 status_code 属性，
+# 保证新增锚点不改变任何分类结果。
+_TEXT_STATUS = re.compile(r"HTTP\s*([1-5]\d{2})", re.IGNORECASE)
+
+
+def _reply_fault(code: str, stage: str, reason: str, *, category: str = "",
+                 disposition: str = "", slot: int = 0) -> None:
+    """统一故障锚点：一条事件一行，取不到的字段不占位。"""
+    fields = [f"[ReplyFault] code={code}", f"stage={stage}"]
+    if category:
+        fields.append(f"category={category}")
+    if disposition:
+        fields.append(f"disposition={disposition}")
+    if slot:
+        fields.append(f"slot=#{slot}")
+    fields.append("reason=" + " ".join(str(reason).split())[:160])
+    logger.warning(" ".join(fields))
+
+
+def _blank_completion(response: object) -> bool:
+    """与调用方 failed() 同口径：无正文、无工具调用、无结果链才算空。"""
+    if getattr(response, "role", "") == "err":
+        return False
+    try:
+        text = str(getattr(response, "completion_text", "") or "").strip()
+    except Exception:
+        return False
+    chain = getattr(getattr(response, "result_chain", None), "chain", None)
+    return not (text or getattr(response, "tools_call_name", None) or chain)
+
+
+def classify(error: object) -> tuple[str, str]:
+    """把所有上游错误收敛为 ``(category, disposition)``。
+
+    category 只用于展示与日志；disposition 决定统一处置：
+    ``retry_then_rotate`` / ``rotate_now_report`` / ``not_an_error`` / ``fail_report``。
+    429 与 5xx 走同一分类路径，只有响应体带配额关键字时才改为立即切换。
+    """
+    text = _error_text(error).casefold()
+    if any(keyword in text for keyword in QUOTA_KEYWORDS):
+        return CATEGORY_QUOTA, DISPOSITION_ROTATE
+    if any(keyword in text for keyword in INTENTIONAL_KEYWORDS):
+        return CATEGORY_INTENTIONAL, DISPOSITION_IGNORE
+    if isinstance(error, RouterConfigError):
+        return CATEGORY_CONFIG, DISPOSITION_FAIL
+    if isinstance(error, Mapping):
+        error_type = str(error.get("error_type") or "").strip().casefold()
+        if error_type in {"configurationerror", CATEGORY_CONFIG}:
+            return CATEGORY_CONFIG, DISPOSITION_FAIL
+    # SDK 超时与内置 TimeoutError 都是临时故障，允许同上游重试一次。
+    if isinstance(error, (TimeoutError, APITimeoutError)):
+        return CATEGORY_TIMEOUT, DISPOSITION_RETRY
+    status = _error_status(error)
+    if status is not None:
+        if status == 408:
+            return CATEGORY_TIMEOUT, DISPOSITION_RETRY
+        if status == 429:
+            return CATEGORY_HTTP_429, DISPOSITION_RETRY
+        if 500 <= status <= 599:
+            return CATEGORY_HTTP_5XX, DISPOSITION_RETRY
+        if status in {401, 403}:
+            return CATEGORY_AUTH, DISPOSITION_ROTATE
+        if status == 402:
+            return CATEGORY_QUOTA, DISPOSITION_ROTATE
+        if status == 404:
+            return CATEGORY_NOT_FOUND, DISPOSITION_ROTATE
+        if status in {400, 422}:
+            return CATEGORY_INVALID_REQUEST, DISPOSITION_ROTATE
+        if 400 <= status <= 499:
+            return CATEGORY_CLIENT, DISPOSITION_ROTATE
+    # 连接失败在不同 SDK 版本里可能没有状态码，按类名识别以保持兼容。
+    if type(error).__name__ == "APIConnectionError":
+        return CATEGORY_CONNECTION, DISPOSITION_RETRY
+    return CATEGORY_UNKNOWN, DISPOSITION_ROTATE
+
+
+def _retry_after_seconds(error: object) -> float | None:
+    """读取 Retry-After 头（秒数或 HTTP 日期），无有效值时返回 None。"""
+    if isinstance(error, Mapping):
+        headers = error.get("headers")
+    else:
+        headers = getattr(getattr(error, "response", None), "headers", None)
+        if headers is None:
+            headers = getattr(error, "headers", None)
+    if not headers:
+        return None
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
+
+
 @dataclass
 class UpstreamState:
     name: str
@@ -117,6 +346,8 @@ class UpstreamState:
     failures: int = 0
     last_error: str = ""
     last_latency_ms: int = 0
+    last_category: str = ""
+    last_disposition: str = ""
 
     def available(self, now: float) -> bool:
         # 兼容旧状态，但历史失败不能冻结后续请求的接口。
@@ -156,10 +387,16 @@ class MultiApiRouterProvider(Provider):
     def __init__(self, plugin_config: dict, provider_settings: dict | None = None):
         original_config = dict(plugin_config) if isinstance(plugin_config, dict) else {}
         plugin_config = self._resolve_plugin_config(plugin_config)
-        provider_id = str(plugin_config.get("provider_id") or PROVIDER_TYPE).strip()
         # 「指定上游」模式：AstrBot 可以为每个上游建一个 Provider 条目，
         # 条目里带 upstream_slot；调用方选中它时只走这个上游，不做自动分配。
         self.pinned_slot = self._detect_pinned_slot(original_config)
+        # 整体 Provider ID 是所有下游插件引用路由的固定标识：恒定使用
+        # PROVIDER_TYPE，忽略配置覆盖；指定上游实例按槽位号生成，不受影响。
+        provider_id = (
+            f"{PINNED_PROVIDER_PREFIX}{self.pinned_slot}"
+            if self.pinned_slot
+            else PROVIDER_TYPE
+        )
         pinned_model = "automatic"
         if self.pinned_slot:
             raw = plugin_config.get(f"upstream_{self.pinned_slot}") or {}
@@ -228,6 +465,8 @@ class MultiApiRouterProvider(Provider):
         )
         # 健康结果只用于展示和确认配置错误，临时异常不能阻止新请求。
         self.health_lookup: Any = None
+        # 真实调用成功后回写健康结果，用于自动解除此前的健康跳过。
+        self.health_recorder: Any = None
         self.skip_unhealthy = bool(plugin_config.get("skip_unhealthy_upstreams", True))
         self.health_skip_ttl_seconds = self._bounded_int(
             plugin_config.get("health_skip_ttl_seconds"), 21600, 60, 604800
@@ -468,19 +707,55 @@ class MultiApiRouterProvider(Provider):
 
     async def _record_success(self, upstream: UpstreamState, latency_ms: int) -> None:
         async with self._state_lock:
+            previous_category = upstream.last_category
+            previous_disposition = upstream.last_disposition
             upstream.calls += 1
             upstream.successes += 1
             upstream.consecutive_failures = 0
             upstream.circuit_open_until = 0.0
             upstream.last_error = ""
             upstream.last_latency_ms = latency_ms
+            upstream.last_category = ""
+            upstream.last_disposition = ""
+        if previous_disposition == DISPOSITION_ROTATE:
+            # 只有 rotate_now_report 会触发健康跳过；真实成功是解除它的最强证据。
+            _reply_fault(
+                "HEALTH_SKIP_CLEAR", "router",
+                "真实调用成功，解除该槽位的健康跳过",
+                category=previous_category, disposition=DISPOSITION_IGNORE,
+                slot=upstream.slot,
+            )
+        if callable(self.health_recorder) and upstream.slot:
+            # 真实调用成功是比探针更强的证据：直接把该槽位写成健康，
+            # 让下一次自动路由立即解除健康跳过，不必等 TTL 或手动检测。
+            protocol = "Chat Completions"
+            if upstream.api_type in {"image_to_text", "multimodal"}:
+                protocol = f"Chat Completions（{API_TYPE_LABELS[upstream.api_type]}）"
+            try:
+                self.health_recorder(
+                    upstream.slot,
+                    {
+                        "ok": True,
+                        "checked_at": int(time.time()),
+                        "latency_ms": latency_ms,
+                        "status": "正常",
+                        "http_status": 200,
+                        "error_type": None,
+                        "disposition": DISPOSITION_IGNORE,
+                        "api_type": upstream.api_type,
+                        "protocol": protocol,
+                    },
+                )
+            except Exception as exc:
+                # 记账失败不能推翻已经成功的模型调用。
+                logger.warning(
+                    "[MultiApiRouter] 回写成功健康状态失败：%s。",
+                    self._safe_error(exc),
+                )
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:
-        status = getattr(exc, "status_code", None)
-        if status is None:
-            response = getattr(exc, "response", None)
-            status = getattr(response, "status_code", None)
+        status = _error_status(exc)
         label = type(exc).__name__
         return f"{label} (HTTP {status})" if status else label
 
@@ -488,24 +763,46 @@ class MultiApiRouterProvider(Provider):
         self, upstream: UpstreamState, exc: Exception, latency_ms: int
     ) -> None:
         safe_error = self._safe_error(exc)
+        category, disposition = classify(exc)
+        # 分类结果已经落在下面的失败日志里；这里只补「为什么没认出来」的锚点。
+        if _error_status(exc) is None:
+            match = _TEXT_STATUS.search(_error_text(exc))
+            if match:
+                _reply_fault(
+                    "PLAINTEXT_STATUS_UNPARSED", "router",
+                    f"文案含 HTTP {match.group(1)}，但异常没有 status_code，按未知错误处理",
+                    category=category, disposition=disposition, slot=upstream.slot,
+                )
+            elif (isinstance(exc, (ConnectionError, OSError))
+                  and category == CATEGORY_UNKNOWN):
+                # TimeoutError 也是 OSError 子类，但已有明确分类，不算「未知」。
+                _reply_fault(
+                    "RAW_CONN_UNKNOWN", "router",
+                    f"连接类异常 {type(exc).__name__} 未命中连接分类，按未知错误处理",
+                    category=category, disposition=disposition, slot=upstream.slot,
+                )
         async with self._state_lock:
             upstream.calls += 1
             upstream.failures += 1
             upstream.consecutive_failures += 1
             upstream.last_error = safe_error
             upstream.last_latency_ms = latency_ms
+            upstream.last_category = category
+            upstream.last_disposition = disposition
             upstream.circuit_open_until = 0.0
         logger.warning(
-            "[MultiApiRouter] 上游 %s 调用失败：%s；将尝试下一个上游。",
+            "[MultiApiRouter] 上游 %s 调用失败：%s；分类 %s/%s，将尝试下一个上游。",
             upstream.name,
             safe_error,
+            category,
+            disposition,
         )
 
     def _health_skip_reason(self, upstream: UpstreamState) -> str:
-        """自动路由跳过已确认的配置错误，不移除上游。
+        """自动路由只跳过 rotate_now_report，不移除上游。
 
-        临时超时、连接错误和服务端异常只用于展示，不能冻结真实请求。
-        仅近期检测确认的认证/权限/接口/额度错误可用于自动路由跳过。
+        临时超时、连接错误、429 与 5xx 只用于展示，不能冻结真实请求；
+        只有近期检测确认的认证/接口/额度等配置错误才参与自动跳过。
         """
         # 固定选择某个 API 时必须真实调用目标，不能被自动路由的健康跳过策略拦截。
         if (
@@ -525,24 +822,22 @@ class MultiApiRouterProvider(Provider):
             # 检测结果过期（例如插件刚启动、长时间未复检），不据此拦截真实请求。
             return ""
         status_code = result.get("http_status")
-        # 402 表示额度不足/欠费，和认证、路径错误一样属于已确认的配置问题。
-        if status_code not in {401, 402, 403, 404}:
+        disposition = str(result.get("disposition") or "").strip()
+        if not disposition:
+            # 兼容旧检测结果：只让明确的错误状态码参与判定，2xx/空响应不拦截。
+            if not isinstance(status_code, int) or status_code < 400:
+                return ""
+            _, disposition = classify(result)
+        if disposition != DISPOSITION_ROTATE:
             return ""
         status = str(result.get("status") or "健康检查未通过")
-        # 带上具体状态码，日志和页面可区分 401/402/403/404。
-        return f"{status} / HTTP {status_code}"
+        # 带上具体状态码，日志和页面可区分不同错误。
+        return f"{status} / HTTP {status_code}" if status_code is not None else status
 
     @staticmethod
     def _retryable_error(exc: Exception) -> bool:
-        """只重试临时请求故障；参数、认证和限流错误不原地重复请求。"""
-        if isinstance(exc, (TimeoutError, APITimeoutError)):
-            return True
-        if type(exc).__name__ == "APIConnectionError":
-            return True
-        status = getattr(exc, "status_code", None)
-        if status is None:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-        return isinstance(status, int) and (status == 408 or 500 <= status <= 599)
+        """同上游重试与否完全由 classify() 的 disposition 决定。"""
+        return classify(exc)[1] == DISPOSITION_RETRY
 
     async def _call_fallback(
         self,
@@ -659,7 +954,14 @@ class MultiApiRouterProvider(Provider):
             except Exception as exc:
                 if attempt + 1 >= max_calls or not self._retryable_error(exc):
                     raise
-                delay = self.retry_interval_seconds
+                # 上游给了 Retry-After 就优先遵守，否则用固定配置间隔；
+                # 两种等待都要通过下面的总预算校验，绝不无限期占用路由时间片。
+                retry_after = _retry_after_seconds(exc)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else self.retry_interval_seconds
+                )
                 # 只有剩余总预算够「一次完整调用 + 重试间隔」时才重试；
                 # 否则外层 wait_for 会在中途截断，等于白占一个上游的时间片。
                 if deadline is not None:
@@ -705,25 +1007,53 @@ class MultiApiRouterProvider(Provider):
         current_in_contexts = bool(contexts) and prompt is None and not image_urls and not audio_urls
         if self.history_image_compaction_enabled:
             contexts, _ = compact_contexts(contexts, current_in_contexts=current_in_contexts)
-        budget = measure_request(
-            prompt, contexts, system_prompt, image_urls=image_urls,
-            extra_user_content_parts=extra_user_content_parts, func_tool=func_tool,
-            tool_calls_result=tool_calls_result, current_in_contexts=current_in_contexts,
-            max_image_bytes=self.max_image_bytes, max_total_image_bytes=self.max_total_image_bytes,
-            max_image_count=self.max_image_count,
-        )
+        try:
+            budget = measure_request(
+                prompt, contexts, system_prompt, image_urls=image_urls,
+                extra_user_content_parts=extra_user_content_parts, func_tool=func_tool,
+                tool_calls_result=tool_calls_result, current_in_contexts=current_in_contexts,
+                max_image_bytes=self.max_image_bytes,
+                max_total_image_bytes=self.max_total_image_bytes,
+                max_image_count=self.max_image_count,
+            )
+        except ValueError as exc:
+            # 预算/格式校验是确定性失败，但调用方只看到无状态码的 ValueError。
+            _reply_fault(
+                "BUDGET_VALUEERROR", "router", f"{exc}（确定性失败，调用方可能按可重试处理）",
+                category=CATEGORY_UNKNOWN, disposition=DISPOSITION_ROTATE,
+            )
+            raise
         size = budget.text_chars
         if size > self.max_input_chars:
+            _reply_fault(
+                "BUDGET_VALUEERROR", "router",
+                f"输入字符数 {size} 超过路由预算 {self.max_input_chars}，未调用上游"
+                "（确定性失败，调用方可能按可重试处理）",
+                category=CATEGORY_UNKNOWN, disposition=DISPOSITION_ROTATE,
+            )
             raise ValueError(
                 f"输入字符数 {size} 超过路由预算 {self.max_input_chars}，未调用上游。"
             )
         if not self.upstreams:
             if self.pinned_slot:
-                raise RuntimeError(
+                _reply_fault(
+                    "CONFIG_ERROR_DISPOSITION", "router",
+                    f"指定上游 #{self.pinned_slot} 未启用或配置不完整，路由判 fail_report",
+                    category=CATEGORY_CONFIG, disposition=DISPOSITION_FAIL,
+                    slot=self.pinned_slot,
+                )
+                raise RouterConfigError(
                     f"指定上游 #{self.pinned_slot} 未启用或配置不完整，"
                     "请在多 API 路由插件中检查。"
                 )
-            raise RuntimeError("多 API 路由器没有可用上游，请先在插件配置中填写 API。")
+            _reply_fault(
+                "CONFIG_ERROR_DISPOSITION", "router",
+                "没有可用上游，路由判 fail_report",
+                category=CATEGORY_CONFIG, disposition=DISPOSITION_FAIL,
+            )
+            raise RouterConfigError(
+                "多 API 路由器没有可用上游，请先在插件配置中填写 API。"
+            )
 
         # 指定了 model 时，只走 model 匹配的上游（供「智能过滤」等插件锁定
         # 路由下某个具体模型，跳过优先级自动降级）；未指定则保持原降级链路。
@@ -736,6 +1066,7 @@ class MultiApiRouterProvider(Provider):
 
         errors: list[str] = []
         health_skipped: list[str] = []
+        quota_seen = False  # 仅用于聚合错误锚点，不参与任何路由判断。
         attempts = 0
         route_timed_out = False
         # 排队、单上游重试与备用切换共用总时限，指定上游也不能无限等待。
@@ -746,7 +1077,12 @@ class MultiApiRouterProvider(Provider):
         if needs_tools:
             candidates = [u for u in candidates if u.supports_tools]
             if not candidates:
-                raise RuntimeError(
+                _reply_fault(
+                    "CONFIG_ERROR_DISPOSITION", "router",
+                    "请求需要工具但没有声明支持工具的上游，路由判 fail_report",
+                    category=CATEGORY_CONFIG, disposition=DISPOSITION_FAIL,
+                )
+                raise RouterConfigError(
                     "本次请求需要调用工具，但当前路由没有任何声明支持工具调用的上游；"
                     "已按原样失败，未执行任何工具调用。请在上游列表中勾选"
                     "「支持工具调用」，或改用支持工具的主模型。"
@@ -815,11 +1151,22 @@ class MultiApiRouterProvider(Provider):
                     )
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_success(upstream, latency_ms)
+                    # 200 空正文在路由侧仍算成功；调用方会按空响应重试，
+                    # 这里给出根因锚点，避免只看到调用方反复重试。
+                    if _blank_completion(response):
+                        _reply_fault(
+                            "EMPTY_BODY_200", "router",
+                            "HTTP 200 但正文为空且无工具调用，已记为上游成功；"
+                            "调用方会按空响应重试",
+                            category="empty_response", disposition=DISPOSITION_IGNORE,
+                            slot=upstream.slot,
+                        )
                     return response
                 except RetryBudgetExhausted as exc:
                     latency_ms = int((time.monotonic() - started) * 1000)
                     # 真实失败已记在上游状态里；跳过重试的原因已在 _call_once 单独打日志。
                     await self._record_failure(upstream, exc.last_error, latency_ms)
+                    quota_seen = quota_seen or upstream.last_category == CATEGORY_QUOTA
                     errors.append(
                         f"{upstream.name}: {self._safe_error(exc.last_error)}"
                         "（剩余预算不足，未重试）"
@@ -827,6 +1174,7 @@ class MultiApiRouterProvider(Provider):
                 except Exception as exc:
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_failure(upstream, exc, latency_ms)
+                    quota_seen = quota_seen or upstream.last_category == CATEGORY_QUOTA
                     errors.append(f"{upstream.name}: {self._safe_error(exc)}")
                     if (
                         deadline is not None
@@ -894,7 +1242,20 @@ class MultiApiRouterProvider(Provider):
             )
         if attempts == 0:
             detail = "；".join(health_skipped) or "无可用上游"
-            raise RuntimeError(f"没有可调用的上游：{detail}。")
+            # 文案里嵌了上游状态（如 HTTP 401），调用方可能据此误判为认证错误。
+            _reply_fault(
+                "HEALTH_SKIP_ALL_401" if "HTTP 401" in detail else "HEALTH_SKIP_ALL",
+                "router", f"全部上游被健康跳过：{detail}；路由判 fail_report",
+                category=CATEGORY_CONFIG, disposition=DISPOSITION_FAIL,
+            )
+            raise RouterConfigError(f"没有可调用的上游：{detail}。")
+        if quota_seen:
+            # 聚合文案只保留 HTTP 429，配额关键字已丢失；调用方会按普通限流重试。
+            _reply_fault(
+                "AGGREGATE_DROP_QUOTA", "router",
+                "配额类失败被聚合为普通 HTTP 429，调用方会重试而不是立即切换",
+                category=CATEGORY_QUOTA, disposition=DISPOSITION_ROTATE,
+            )
         raise RuntimeError(
             f"多 API 路由失败，已尝试 {attempts} 个上游：{'; '.join(errors)}"
         )
@@ -1098,7 +1459,7 @@ class MultiApiRouterPlugin(Star):
         return {
             str(inst.meta().id)
             for inst in self._router_instances
-        } | {str(self.config.get("provider_id") or PROVIDER_TYPE)}
+        } | {PROVIDER_TYPE}
 
     async def _install_router_providers(self) -> str:
         """注册「整体」和「每个上游」两类 AstrBot Provider。
@@ -1140,6 +1501,7 @@ class MultiApiRouterPlugin(Star):
             await self._close_router_instance(existing)
 
         router.health_lookup = self._health_results.get
+        router.health_recorder = self._record_health_success
         router.fallback_resolver = self._resolve_fallback_provider
         instances = [router]
         # 保留线上 source 名称映射，重载时排除本插件旧 source，避免追加后缀。
@@ -1173,6 +1535,7 @@ class MultiApiRouterPlugin(Star):
             pinned_config["parent_provider_id"] = provider_id
             pinned = MultiApiRouterProvider(pinned_config)
             pinned.health_lookup = self._health_results.get
+            pinned.health_recorder = self._record_health_success
             # 指定上游模式不自动降级，也不回退主模型。
             pinned.fallback_resolver = None
             instances.append(pinned)
@@ -1797,6 +2160,8 @@ class MultiApiRouterPlugin(Star):
                 "status": "配置不完整",
                 "http_status": None,
                 "error_type": "ConfigurationError",
+                "category": CATEGORY_CONFIG,
+                "disposition": DISPOSITION_FAIL,
                 "api_type": api_type,
                 "protocol": "",
             }
@@ -1825,6 +2190,8 @@ class MultiApiRouterPlugin(Star):
             )
             latency_ms = int((time.monotonic() - started) * 1000)
             if not has_response:
+                # 空响应多见于思考型模型耗尽探针输出预算，不等于配置错误，
+                # 因此只展示、不参与自动跳过，避免冻结真实请求。
                 return {
                     "ok": False,
                     "checked_at": int(time.time()),
@@ -1832,6 +2199,8 @@ class MultiApiRouterPlugin(Star):
                     "status": "响应为空",
                     "http_status": 200,
                     "error_type": "EmptyResponse",
+                    "category": "empty_response",
+                    "disposition": DISPOSITION_IGNORE,
                     "api_type": api_type,
                     "protocol": protocol,
                 }
@@ -1852,31 +2221,18 @@ class MultiApiRouterPlugin(Star):
             }
         except Exception as exc:
             latency_ms = int((time.monotonic() - started) * 1000)
-            status_code = getattr(exc, "status_code", None)
-            if status_code is None:
-                response = getattr(exc, "response", None)
-                status_code = getattr(response, "status_code", None)
+            category, disposition = classify(exc)
+            status_code = _error_status(exc)
             error_type = type(exc).__name__
-            if status_code in {401, 403}:
-                status = "认证失败"
-            elif status_code == 402:
-                # 402 是账户余额/额度问题，页面要能直接看出来。
-                status = "额度不足或欠费"
-            elif status_code == 404:
-                status = "接口或模型不存在"
-            elif status_code == 429:
-                status = "限流或额度不足"
-            elif status_code and int(status_code) >= 500:
-                status = "服务端异常"
-            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError, APITimeoutError)):
-                status = "请求超时"
-            else:
-                status = "连接或请求失败"
+            # 判定全部来自 classify()，这里只负责把分类翻成页面文案。
+            status = HEALTH_STATUS_LABELS.get(category, "连接或请求失败")
             logger.warning(
-                "[MultiApiRouter] 上游检测失败：%s，%s%s。",
+                "[MultiApiRouter] 上游检测失败：%s，%s%s；分类 %s/%s。",
                 name,
                 error_type,
                 f" HTTP {status_code}" if status_code else "",
+                category,
+                disposition,
             )
             return {
                 "ok": False,
@@ -1885,11 +2241,19 @@ class MultiApiRouterPlugin(Star):
                 "status": status,
                 "http_status": status_code,
                 "error_type": error_type,
+                "category": category,
+                "disposition": disposition,
                 "api_type": api_type,
                 "protocol": API_TYPE_LABELS[api_type],
             }
         finally:
             await client.close()
+
+    def _record_health_success(self, slot: int, result: dict) -> None:
+        """真实调用成功时覆盖该槽位健康结果，立即解除自动路由的健康跳过。"""
+        if 1 <= slot <= MAX_UPSTREAMS:
+            # 与 _check_upstream_slot 保持一致：写入都在事件循环内完成，不另加锁。
+            self._health_results[slot] = result
 
     async def _check_upstream_slot(self, slot: int) -> dict:
         if slot < 1 or slot > MAX_UPSTREAMS:
@@ -2058,29 +2422,22 @@ class MultiApiRouterPlugin(Star):
                 )
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
-        except (asyncio.TimeoutError, TimeoutError, APITimeoutError):
-            return error_response(
-                "获取模型列表超时，请检查 API Base 或稍后重试",
-                status_code=504,
-            )
         except Exception as exc:
-            status_code = getattr(exc, "status_code", None)
-            if status_code in {401, 403}:
-                message = "认证失败，请检查 API Key 或模型列表权限"
-            elif status_code == 404:
-                message = "该服务未提供 OpenAI 兼容的 /models 接口"
-            elif status_code == 429:
-                message = "请求过于频繁或额度受限，请稍后重试"
-            elif status_code and int(status_code) >= 500:
-                message = "上游服务暂时异常，请稍后重试"
-            else:
-                message = "无法获取模型列表，请检查 API Base 和网络连接"
+            # 判定全部来自 classify()，这里只负责把分类翻成页面文案与 HTTP 码。
+            category, disposition = classify(exc)
+            status_code = _error_status(exc)
+            message = MODEL_LIST_ERROR_MESSAGES.get(category, DEFAULT_MODEL_LIST_ERROR)
             logger.warning(
-                "[MultiApiRouter] 获取模型列表失败：%s%s。",
+                "[MultiApiRouter] 获取模型列表失败：%s%s；分类 %s/%s。",
                 type(exc).__name__,
                 f" HTTP {status_code}" if status_code else "",
+                category,
+                disposition,
             )
-            return error_response(message, status_code=502)
+            return error_response(
+                message,
+                status_code=504 if category == CATEGORY_TIMEOUT else 502,
+            )
         return json_response(
             {
                 "models": models,
@@ -2233,6 +2590,8 @@ class MultiApiRouterPlugin(Star):
                     self.config.get("retry_interval_seconds"), 1.0, 0, 3600
                 ),
             )
+        # 整体 ID 恒定，配置里即使残留旧值也不影响展示与运行时。
+        global_fields["provider_id"] = PROVIDER_TYPE
         return json_response(
             {
                 "provider_id": (
@@ -2556,10 +2915,15 @@ class MultiApiRouterPlugin(Star):
                     raise ValueError(f"global 包含不支持的字段: {sorted(unknown_global)}")
                 for key, value in global_update.items():
                     if key == "provider_id":
-                        provider_id = str(value or "").strip()
-                        if not provider_id:
-                            raise ValueError("provider_id 不能为空")
-                        self.config["provider_id"] = provider_id
+                        # 整体 ID 已固定：为兼容旧页面缓存保留该字段，但忽略提交值。
+                        submitted = str(value or "").strip()
+                        if submitted and submitted != PROVIDER_TYPE:
+                            logger.warning(
+                                "[MultiApiRouter] provider_id 已固定为 %s，忽略提交值 %s",
+                                PROVIDER_TYPE,
+                                submitted,
+                            )
+                        self.config["provider_id"] = PROVIDER_TYPE
                     elif key == "enabled":
                         self.config["enabled"] = bool(value)
                     elif key == "history_image_compaction_enabled":
