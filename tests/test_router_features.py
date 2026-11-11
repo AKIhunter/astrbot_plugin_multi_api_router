@@ -738,6 +738,75 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(default_provider.max_input_chars, 262144)
         self.assertEqual(custom_provider.max_input_chars, 300000)
 
+    async def test_deleted_slot_is_retired_and_never_reused(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = dict(self)
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({
+            "upstream_1": upstream(1),
+            "upstream_6": upstream(6),
+        })
+        plugin.router = None
+        plugin._health_results = {6: {"ok": True}}
+        with mock.patch.object(
+            router_module, "request",
+            types.SimpleNamespace(
+                json=mock.AsyncMock(return_value={"delete_slots": [6]})),
+        ), mock.patch.object(
+            router_module, "json_response", side_effect=lambda data: data,
+        ), mock.patch.object(
+            plugin, "_reload_router", new_callable=mock.AsyncMock,
+        ):
+            result = await plugin.api_save_upstreams()
+        self.assertTrue(result["ok"])
+        self.assertNotIn("upstream_6", plugin.config)
+        self.assertEqual(plugin.config["retired_slots"], [6])
+        self.assertNotIn(6, plugin._health_results)
+        self.assertTrue(plugin.config.saved)
+        self.assertEqual(plugin.config.saved["retired_slots"], [6])
+
+        # 重复删除同一槽位不会重复记录，也不会把已退役编号从清单里去掉。
+        with mock.patch.object(
+            router_module, "request",
+            types.SimpleNamespace(
+                json=mock.AsyncMock(return_value={"delete_slots": [6]})),
+        ), mock.patch.object(
+            router_module, "json_response", side_effect=lambda data: data,
+        ), mock.patch.object(
+            plugin, "_reload_router", new_callable=mock.AsyncMock,
+        ):
+            await plugin.api_save_upstreams()
+        self.assertEqual(plugin.config["retired_slots"], [6])
+
+    def test_retired_slots_ignore_old_missing_and_invalid_values(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        # 旧配置没有 retired_slots 字段时视为空列表。
+        self.assertEqual(plugin._retired_slots(), [])
+        plugin.config["retired_slots"] = ["6", 6, 0, 21, "bad", None]
+        self.assertEqual(plugin._retired_slots(), [6])
+        plugin.config["retired_slots"] = "6"
+        self.assertEqual(plugin._retired_slots(), [])
+
+    async def test_upstream_apis_expose_retired_slots(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "upstream_1": upstream(1),
+            "retired_slots": [4, 9],
+        }
+        plugin.router = None
+        plugin._health_results = {}
+        plugin._health_inflight = set()
+        with mock.patch.object(
+            router_module, "json_response", side_effect=lambda data: data,
+        ):
+            config_payload = await plugin.api_upstreams_config()
+            public_payload = await plugin.api_upstreams()
+        self.assertEqual(config_payload["retired_slots"], [4, 9])
+        self.assertEqual(public_payload["retired_slots"], [4, 9])
+
 
 class FakeEndpoint:
     def __init__(self, response):
@@ -786,6 +855,51 @@ class FakeProbeClient:
 
 
 class TypedProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reasoning_probe_has_budget_for_final_text(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+
+        async def reasoning_first(**kwargs):
+            # 模拟先消耗推理预算、随后输出正文的模型；旧 8-token 探针会失败。
+            enough = kwargs["max_tokens"] >= 96
+            return types.SimpleNamespace(choices=[
+                types.SimpleNamespace(
+                    finish_reason="stop" if enough else "length",
+                    message=types.SimpleNamespace(
+                        content="OK" if enough else "",
+                        reasoning_content="reasoning",
+                    ),
+                )
+            ])
+
+        for api_type in ("chat", "image_to_text", "multimodal"):
+            with self.subTest(api_type=api_type):
+                client = FakeProbeClient()
+                client.chat_endpoint.create = mock.AsyncMock(side_effect=reasoning_first)
+                ok, _ = await plugin._execute_typed_probe(
+                    client, api_type=api_type, model="reasoning-model"
+                )
+                self.assertTrue(ok)
+                client.chat_endpoint.create.assert_awaited_once()
+
+    async def test_reasoning_only_probe_still_reports_empty_response(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
+        response = types.SimpleNamespace(choices=[
+            types.SimpleNamespace(
+                finish_reason="length",
+                message=types.SimpleNamespace(content="", reasoning_content="reasoning"),
+            )
+        ])
+        client = FakeProbeClient()
+        client.chat_endpoint.response = response
+        client.close = mock.AsyncMock()
+        with mock.patch.object(router_module, "AsyncOpenAI", return_value=client):
+            result = await plugin._probe_upstream(1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(result["error_type"], "EmptyResponse")
+        client.close.assert_awaited_once()
+
     async def test_gpt_image_probe_uses_supported_square_size(self):
         plugin = object.__new__(router_module.MultiApiRouterPlugin)
         for model, expected_size in (

@@ -1622,6 +1622,24 @@ class MultiApiRouterPlugin(Star):
             "保存模型 API 上游配置",
         )
 
+    def _retired_slots(self) -> list[int]:
+        """已删除（退役）的槽位号：新增上游时永不复用，避免旧引用静默指向新上游。
+
+        旧配置没有该字段时视为空列表；非法值直接忽略，保证向后兼容。
+        """
+        raw = self.config.get("retired_slots")
+        if not isinstance(raw, list):
+            return []
+        slots: set[int] = set()
+        for item in raw:
+            try:
+                slot = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= slot <= MAX_UPSTREAMS:
+                slots.add(slot)
+        return sorted(slots)
+
     def _render_slots(self) -> list[int]:
         """要展示给控制台的槽位号：至少 MIN_UPSTREAMS 个基础槽位，
         并纳入配置里已存在的高编号槽位（支持「新增 API」扩展到 MAX_UPSTREAMS）。"""
@@ -1705,7 +1723,8 @@ class MultiApiRouterPlugin(Star):
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": "Reply with exactly OK."}],
-                max_tokens=8,
+                # 推理 token 也占输出预算；8 token 会让可用模型在正文前被截断。
+                max_tokens=256,
                 temperature=0,
             )
             text = ""
@@ -1926,6 +1945,7 @@ class MultiApiRouterPlugin(Star):
                     len(self.router.upstreams) if self.router else 0
                 ),
                 "strategy": self._strategy_data(),
+                "retired_slots": self._retired_slots(),
                 "upstreams": [
                     self._upstream_public_data(slot) for slot in self._render_slots()
                 ],
@@ -2223,6 +2243,7 @@ class MultiApiRouterPlugin(Star):
                 ),
                 "strategy": self._strategy_data(),
                 "global": global_fields,
+                "retired_slots": self._retired_slots(),
                 "upstreams": [
                     self._upstream_full_data(
                         slot,
@@ -2508,6 +2529,12 @@ class MultiApiRouterPlugin(Star):
                     key = f"upstream_{slot}"
                     if key in self.config:
                         del self.config[key]
+                        # 删除即退役：编号不再复用，防止其他插件保存的旧
+                        # multi_api_router:upstream_N 静默指向一个新上游。
+                        retired = self._retired_slots()
+                        if slot not in retired:
+                            retired.append(slot)
+                        self.config["retired_slots"] = sorted(retired)
                     self._health_results.pop(slot, None)
 
             # 1. 校验并写入内存配置

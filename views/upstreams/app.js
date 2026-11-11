@@ -115,10 +115,8 @@ function visibleUpstreams() {
 }
 
 function upstreamLabel(slot) {
-  // 提示使用当前页面顺序；固定 slot 只用于请求定位，拖拽后两者可能不同。
-  const index = Array.from(list.querySelectorAll(".upstream"))
-    .findIndex((article) => Number(article.dataset.slot) === Number(slot));
-  return index >= 0 ? `上游 ${index + 1}` : "该上游";
+  // 统一用固定槽位号：页面行号会随排序/删除变化，槽位号才是其他插件引用的值。
+  return `上游 #${slot}`;
 }
 
 function nextPriority() {
@@ -300,7 +298,7 @@ function updateSummary() {
 function render() {
   list.replaceChildren();
   const ordered = visibleUpstreams();
-  for (const [index, upstream] of ordered.entries()) {
+  for (const upstream of ordered) {
     const fragment = template.content.cloneNode(true);
     const article = fragment.querySelector(".upstream");
     const health = upstream.health;
@@ -311,8 +309,11 @@ function render() {
 
     // 折叠头部摘要
     const toggle = fragment.querySelector(".upstream-toggle");
-    // 这里显示的是页面顺序编号，不是固定槽位号；拖拽后会自动从上到下重排。
-    fragment.querySelector(".slot").textContent = `#${index + 1}`;
+    // 显示固定槽位号：其他插件引用此上游时用的就是它，拖拽/删除不会改变。
+    const slotLabel = fragment.querySelector(".slot");
+    slotLabel.textContent = `#${upstream.slot}`;
+    slotLabel.title =
+      `槽位号 ${upstream.slot}：其他插件引用时使用 multi_api_router:upstream_${upstream.slot}`;
     fragment.querySelector(".upstream-name").textContent =
       escapeText(upstream.name) || "未命名";
     const toolTag = fragment.querySelector(".tool-tag");
@@ -641,10 +642,13 @@ async function checkUpstream(slot, ...buttons) {
 }
 
 function addUpstream() {
+  // 已删除的槽位是「退役」编号，永不复用：避免别处保存的旧引用静默指向新上游。
+  const retired = new Set((state.retired_slots || []).map(Number));
   // 优先复用配置里已存在但页面隐藏的空槽位（历史备份槽位），
   // 避免直接顶到 20 个上限而无法新增。
   const reusable = state.upstreams.find(
-    (item) => !item.route_enabled && !item.configured && !addedSlots.has(item.slot),
+    (item) => !item.route_enabled && !item.configured
+      && !addedSlots.has(item.slot) && !retired.has(Number(item.slot)),
   );
   if (reusable) {
     captureOperationSnapshot();
@@ -663,13 +667,16 @@ function addUpstream() {
   const used = new Set(state.upstreams.map((item) => item.slot));
   let nextSlot = 0;
   for (let slot = 1; slot <= MAX_UPSTREAMS; slot += 1) {
-    if (!used.has(slot)) {
+    if (!used.has(slot) && !retired.has(slot)) {
       nextSlot = slot;
       break;
     }
   }
   if (!nextSlot) {
-    showToast(`最多支持 ${MAX_UPSTREAMS} 个上游`, true);
+    showToast(
+      `没有可用槽位：${MAX_UPSTREAMS} 个编号均已占用或已退役（删除过的编号不会复用）`,
+      true,
+    );
     return;
   }
   captureOperationSnapshot();

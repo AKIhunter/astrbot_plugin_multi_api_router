@@ -216,6 +216,7 @@
           <section>
             <h3>指定某个上游</h3>
             <p>其他插件的模型选择器会直接显示上游名称和模型，不展示内部路由前缀。选中后只走该 API，不自动切换，也不回退主模型。</p>
+            <p>每行左侧的 <code>#编号</code> 是固定槽位号（例如 <code>#12</code> 对应 <code>multi_api_router:upstream_12</code>），拖拽排序或删除其他条目都不会改变它；其他插件引用时用的就是这个编号。已删除的编号会退役，不会被新条目复用。</p>
           </section>
           <section>
             <h3>常见搭配示例</h3>
@@ -238,6 +239,6 @@
     </div>
 
     <div class="toast" id="toast" hidden></div>
-    <script type="module" src="./app.js?v=apikey-mask-20261110"></script>
+    <script type="module" src="./app.js?v=slot-retire-20261111"></script>
   </body>
 </html>
