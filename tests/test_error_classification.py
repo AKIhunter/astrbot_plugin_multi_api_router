@@ -343,5 +343,177 @@ class HealthSuccessRecordingTests(unittest.IsolatedAsyncioTestCase):
             call.assert_awaited_once()
 
 
+class BareRateLimitError(Exception):
+    """模拟拿不到响应体、也拿不到响应头的 429。"""
+
+    status_code = 429
+
+
+class RateLimitLogTests(unittest.IsolatedAsyncioTestCase):
+    """[RateLimit] 留痕：只验证日志内容，同时复核重试次数与等待不变。"""
+
+    def setUp(self):
+        self.providers = []
+        patcher = mock.patch.object(router_module, "logger")
+        self.logger = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def build_provider(self):
+        provider = router_module.MultiApiRouterProvider(
+            {
+                "provider_id": router_module.PROVIDER_TYPE,
+                "fallback_to_main_model": False,
+                "max_attempts": 5,
+                "upstream_1": upstream(1),
+            }
+        )
+        self.providers.append(provider)
+        return provider
+
+    async def asyncTearDown(self):
+        for provider in self.providers:
+            for item in provider._all_upstreams:
+                await item.client.client.close()
+
+    def rate_limit_lines(self):
+        return [
+            str(call.args[0])
+            for call in self.logger.warning.call_args_list
+            if call.args and str(call.args[0]).startswith("[RateLimit]")
+        ]
+
+    async def test_429_retry_path_logs_received_resolved_and_route(self):
+        provider = self.build_provider()
+        client = provider.upstreams[0].client
+        failure = APIStatusError(
+            "fixture rejection",
+            response=httpx.Response(
+                429,
+                headers={"retry-after": "2"},
+                request=httpx.Request("POST", "https://example.invalid/v1"),
+            ),
+            body={
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": "too many requests\nplease retry",
+                }
+            },
+        )
+        with mock.patch.object(
+            client, "get_model", return_value="model-1"
+        ), mock.patch.object(
+            client, "_prepare_chat_payload", return_value=({"model": "model-1"}, [])
+        ), mock.patch.object(
+            client, "_query", side_effect=[failure, "recovered"]
+        ) as call, mock.patch.object(
+            router_module.asyncio, "sleep", new_callable=mock.AsyncMock
+        ) as sleep:
+            result = await provider.text_chat(prompt="fixture")
+
+        # 行为不变：仍是一次重试、仍按 Retry-After 等 2 秒。
+        self.assertEqual(result, "recovered")
+        self.assertEqual(call.await_count, 2)
+        sleep.assert_awaited_once_with(2.0)
+
+        lines = self.rate_limit_lines()
+        self.assertEqual(
+            [line.split()[1] for line in lines],
+            ["event=received", "event=resolved", "event=route"],
+        )
+        received, resolved, route = lines
+        self.assertRegex(
+            received,
+            r"^\[RateLimit\] event=received ts=\S+ slot=#1 upstream=\"api-1\""
+            r" model=\"model-1\" http=429 attempt=1/2"
+            r" error_type=\"rate_limit_error\""
+            r" error_code=\"rate_limit_exceeded\""
+            r" error_message=\"too many requests please retry\""
+            r" retry_after_raw=\"2\" retry_after_s=2.00 quota_hit=no$",
+        )
+        self.assertRegex(
+            resolved,
+            r"^\[RateLimit\] event=resolved ts=\S+ slot=#1 upstream=\"api-1\""
+            r" model=\"model-1\" http=429 retried=yes wait_s=2.00"
+            r" retry_result=success next=return_to_caller"
+            r" health=unchanged_by_rate_limit$",
+        )
+        self.assertRegex(
+            route,
+            r"^\[RateLimit\] event=route ts=\S+ attempts=1"
+            r" outcome=served_by final=#1$",
+        )
+        self.assertNotIn("test-key", " ".join(lines))
+        self.assertNotIn("\n", " ".join(lines))
+
+    async def test_quota_429_logs_no_retry_and_rotate(self):
+        provider = self.build_provider()
+        client = provider.upstreams[0].client
+        failure = APIStatusError(
+            "fixture rejection",
+            response=httpx.Response(
+                429,
+                request=httpx.Request("POST", "https://example.invalid/v1"),
+            ),
+            body={"error": {"code": "insufficient_quota", "message": "quota exceeded"}},
+        )
+        with mock.patch.object(
+            client, "get_model", return_value="model-1"
+        ), mock.patch.object(
+            client, "_prepare_chat_payload", return_value=({"model": "model-1"}, [])
+        ), mock.patch.object(
+            client, "_query", side_effect=failure
+        ) as call, mock.patch.object(
+            router_module.asyncio, "sleep", new_callable=mock.AsyncMock
+        ) as sleep:
+            with self.assertRaisesRegex(RuntimeError, "路由失败"):
+                await provider.text_chat(prompt="fixture")
+
+        # 行为不变：配额 429 不重试、不等待。
+        call.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+        received, resolved, route = self.rate_limit_lines()
+        self.assertIn("quota_hit=yes", received)
+        self.assertIn('retry_after_raw="无"', received)
+        self.assertIn("retry_after_s=无", received)
+        self.assertIn('error_type="不可得"', received)
+        self.assertIn('error_code="insufficient_quota"', received)
+        self.assertIn("retried=no", resolved)
+        self.assertIn("wait_s=0.00", resolved)
+        self.assertIn("retry_result=not_retried", resolved)
+        self.assertIn("next=rotate", resolved)
+        self.assertIn("health=unchanged_by_rate_limit", resolved)
+        self.assertIn("outcome=failed", route)
+        self.assertIn("final=-", route)
+
+    async def test_429_without_response_headers_is_marked_unavailable(self):
+        provider = self.build_provider()
+        client = provider.upstreams[0].client
+        with mock.patch.object(
+            client, "get_model", return_value="model-1"
+        ), mock.patch.object(
+            client, "_prepare_chat_payload", return_value=({"model": "model-1"}, [])
+        ), mock.patch.object(
+            client, "_query", side_effect=[BareRateLimitError("raw 429"), "recovered"]
+        ) as call, mock.patch.object(
+            router_module.asyncio, "sleep", new_callable=mock.AsyncMock
+        ) as sleep:
+            result = await provider.text_chat(prompt="fixture")
+
+        # 行为不变：无响应头时仍按固定间隔重试一次。
+        self.assertEqual(result, "recovered")
+        self.assertEqual(call.await_count, 2)
+        sleep.assert_awaited_once_with(1.0)
+
+        received = self.rate_limit_lines()[0]
+        self.assertIn("http=429", received)
+        self.assertIn('retry_after_raw="响应头不可得"', received)
+        self.assertIn("retry_after_s=响应头不可得", received)
+        self.assertIn('error_type="不可得"', received)
+        self.assertIn('error_code="不可得"', received)
+        self.assertIn('error_message="不可得"', received)
+
+
 if __name__ == "__main__":
     unittest.main()
