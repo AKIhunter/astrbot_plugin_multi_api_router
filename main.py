@@ -330,6 +330,171 @@ def _retry_after_seconds(error: object) -> float | None:
     return max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
 
 
+RATE_LIMIT_LOG_LIMIT = 160
+RATE_LIMIT_ABSENT = "不可得"
+RATE_LIMIT_HEADER_ABSENT = "响应头不可得"
+RATE_LIMIT_NO_VALUE = "无"
+
+
+def _rate_limit_text(value: object, limit: int = RATE_LIMIT_LOG_LIMIT) -> str:
+    """日志字段压成单行并截断，避免响应体的换行破坏 grep/awk。"""
+    if value in (None, ""):
+        return RATE_LIMIT_ABSENT
+    text = " ".join(str(value).split()).replace('"', "'")
+    return text[:limit] + "..." if len(text) > limit else text
+
+
+def _rate_limit_model(upstream: "UpstreamState") -> str:
+    try:
+        return _rate_limit_text(upstream.client.get_model())
+    except Exception:
+        return RATE_LIMIT_ABSENT
+
+
+def _rate_limit_error_fields(error: object) -> tuple[str, str, str]:
+    """只提取 error.type / error.code / error.message，拿不到就记「不可得」。"""
+    if isinstance(error, Mapping):
+        raw: object = error.get("body")
+    else:
+        raw = getattr(error, "body", None)
+    payload: object = None
+    if isinstance(raw, Mapping):
+        payload = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        payload = parsed if isinstance(parsed, Mapping) else None
+    if payload is None:
+        if isinstance(error, Mapping):
+            payload = error
+        else:
+            response = getattr(error, "response", None)
+            if response is not None:
+                try:
+                    parsed = response.json()
+                except Exception:
+                    parsed = None
+                payload = parsed if isinstance(parsed, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return (RATE_LIMIT_ABSENT, RATE_LIMIT_ABSENT, RATE_LIMIT_ABSENT)
+    detail = payload.get("error")
+    if not isinstance(detail, Mapping):
+        detail = payload
+    return (
+        _rate_limit_text(detail.get("type")),
+        _rate_limit_text(detail.get("code")),
+        _rate_limit_text(detail.get("message")),
+    )
+
+
+def _rate_limit_retry_after(error: object) -> tuple[str, str]:
+    """返回 (原始值, 换算秒数)，区分「无」与「响应头不可得」。"""
+    if isinstance(error, Mapping):
+        headers = error.get("headers")
+    else:
+        headers = getattr(getattr(error, "response", None), "headers", None)
+        if headers is None:
+            headers = getattr(error, "headers", None)
+    if headers is None:
+        return (RATE_LIMIT_HEADER_ABSENT, RATE_LIMIT_HEADER_ABSENT)
+    try:
+        raw = headers.get("retry-after")
+        if raw is None:
+            raw = headers.get("Retry-After")
+    except Exception:
+        return (RATE_LIMIT_HEADER_ABSENT, RATE_LIMIT_HEADER_ABSENT)
+    if raw is None or not str(raw).strip():
+        return (RATE_LIMIT_NO_VALUE, RATE_LIMIT_NO_VALUE)
+    parsed = _retry_after_seconds(error)
+    return (
+        _rate_limit_text(raw),
+        f"{parsed:.2f}" if parsed is not None else "不可解析",
+    )
+
+
+def _rate_limit_ts() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _rate_limit_quota_hit(error: object) -> str:
+    text = _error_text(error).casefold()
+    return "yes" if any(keyword in text for keyword in QUOTA_KEYWORDS) else "no"
+
+
+def _emit_rate_limit(line: str) -> None:
+    """留痕失败绝不能影响真实调用。"""
+    try:
+        logger.warning(line)
+    except Exception:
+        pass
+
+
+def _log_rate_limit_received(
+    upstream: "UpstreamState", error: object, attempt: int, total: int
+) -> None:
+    try:
+        error_type, error_code, error_message = _rate_limit_error_fields(error)
+        raw, seconds = _rate_limit_retry_after(error)
+        line = " ".join([
+            "[RateLimit]",
+            "event=received",
+            f"ts={_rate_limit_ts()}",
+            f"slot=#{upstream.slot}",
+            f'upstream="{_rate_limit_text(upstream.name)}"',
+            f'model="{_rate_limit_model(upstream)}"',
+            f"http={_error_status(error) or 429}",
+            f"attempt={attempt}/{total}",
+            f'error_type="{error_type}"',
+            f'error_code="{error_code}"',
+            f'error_message="{error_message}"',
+            f'retry_after_raw="{raw}"',
+            f"retry_after_s={seconds}",
+            f"quota_hit={_rate_limit_quota_hit(error)}",
+        ])
+    except Exception:
+        return
+    _emit_rate_limit(line)
+
+
+def _log_rate_limit_resolved(
+    upstream: "UpstreamState",
+    error: object | None,
+    *,
+    retried: bool,
+    wait_s: float,
+    result: str,
+    next_action: str,
+) -> None:
+    try:
+        line = " ".join([
+            "[RateLimit]",
+            "event=resolved",
+            f"ts={_rate_limit_ts()}",
+            f"slot=#{upstream.slot}",
+            f'upstream="{_rate_limit_text(upstream.name)}"',
+            f'model="{_rate_limit_model(upstream)}"',
+            f"http={_error_status(error) or 429}",
+            f"retried={'yes' if retried else 'no'}",
+            f"wait_s={wait_s:.2f}",
+            f"retry_result={result}",
+            f"next={next_action}",
+            "health=unchanged_by_rate_limit",
+        ])
+    except Exception:
+        return
+    _emit_rate_limit(line)
+
+
+def _log_rate_limit_route(outcome: str, attempts: int, final: str) -> None:
+    _emit_rate_limit(
+        "[RateLimit]"
+        f" event=route ts={_rate_limit_ts()}"
+        f" attempts={attempts} outcome={outcome} final={final}"
+    )
+
+
 @dataclass
 class UpstreamState:
     name: str
@@ -909,6 +1074,7 @@ class MultiApiRouterProvider(Provider):
         tool_choice: Literal["auto", "required"],
         kwargs: dict,
         deadline: float | None = None,
+        rate_limit_trace: dict | None = None,
     ) -> LLMResponse:
         if func_tool and not func_tool.empty() and not upstream.supports_tools:
             raise RuntimeError("upstream does not support tool calls")
@@ -942,17 +1108,46 @@ class MultiApiRouterProvider(Provider):
             payloads["tool_choice"] = tool_choice
         # 首次调用不计入重试次数；设为 0 时每个上游只调用一次。
         max_calls = self.upstream_retry_count + 1
+        # 仅用于 [RateLimit] 留痕：不参与重试判定、等待与切换。
+        rate_limit_retried = False
+        rate_limit_wait = 0.0
         for attempt in range(max_calls):
             try:
                 # _query 会改写 payload，重试必须复用相同输入；SDK 本层只尝试一次。
-                return await upstream.client._query(
+                response = await upstream.client._query(
                     deepcopy(payloads),
                     func_tool,
                     request_max_retries=1,
                     conversation_id=kwargs.get("conversation_id"),
                 )
+                if rate_limit_retried:
+                    _log_rate_limit_resolved(
+                        upstream,
+                        None,
+                        retried=True,
+                        wait_s=rate_limit_wait,
+                        result="success",
+                        next_action="return_to_caller",
+                    )
+                return response
             except Exception as exc:
+                rate_limited = _error_status(exc) == 429
+                if rate_limited:
+                    if rate_limit_trace is not None:
+                        rate_limit_trace["hit"] = True
+                    _log_rate_limit_received(upstream, exc, attempt + 1, max_calls)
                 if attempt + 1 >= max_calls or not self._retryable_error(exc):
+                    if rate_limited or rate_limit_retried:
+                        _log_rate_limit_resolved(
+                            upstream,
+                            exc,
+                            retried=rate_limit_retried,
+                            wait_s=rate_limit_wait,
+                            result="failed" if rate_limit_retried else "not_retried",
+                            next_action=(
+                                "raise_to_caller" if self.pinned_slot else "rotate"
+                            ),
+                        )
                     raise
                 # 上游给了 Retry-After 就优先遵守，否则用固定配置间隔；
                 # 两种等待都要通过下面的总预算校验，绝不无限期占用路由时间片。
@@ -975,6 +1170,17 @@ class MultiApiRouterProvider(Provider):
                             self.request_timeout_seconds,
                             delay,
                         )
+                        if rate_limited or rate_limit_retried:
+                            _log_rate_limit_resolved(
+                                upstream,
+                                exc,
+                                retried=rate_limit_retried,
+                                wait_s=rate_limit_wait,
+                                result="budget_exhausted",
+                                next_action=(
+                                    "raise_to_caller" if self.pinned_slot else "rotate"
+                                ),
+                            )
                         raise RetryBudgetExhausted(
                             f"{upstream.name} 剩余预算不足，未重试", exc
                         ) from exc
@@ -983,6 +1189,9 @@ class MultiApiRouterProvider(Provider):
                     upstream.name, self._safe_error(exc), delay,
                     attempt + 1, self.upstream_retry_count,
                 )
+                if rate_limited:
+                    rate_limit_retried = True
+                    rate_limit_wait += delay
                 # 外层总时限同时覆盖本次等待；取消直接传播，不执行或重放工具。
                 await asyncio.sleep(delay)
 
@@ -1067,6 +1276,8 @@ class MultiApiRouterProvider(Provider):
         errors: list[str] = []
         health_skipped: list[str] = []
         quota_seen = False  # 仅用于聚合错误锚点，不参与任何路由判断。
+        # 仅用于 [RateLimit] 留痕：记录本次请求是否遇到过 429，不参与任何路由判断。
+        rate_limit_trace: dict[str, bool] = {"hit": False}
         attempts = 0
         route_timed_out = False
         # 排队、单上游重试与备用切换共用总时限，指定上游也不能无限等待。
@@ -1143,6 +1354,7 @@ class MultiApiRouterProvider(Provider):
                         tool_choice=tool_choice,
                         kwargs=kwargs,
                         deadline=deadline,
+                        rate_limit_trace=rate_limit_trace,
                     )
                     response = (
                         await asyncio.wait_for(call, timeout=remaining)
@@ -1161,12 +1373,20 @@ class MultiApiRouterProvider(Provider):
                             category="empty_response", disposition=DISPOSITION_IGNORE,
                             slot=upstream.slot,
                         )
+                    if rate_limit_trace["hit"]:
+                        _log_rate_limit_route(
+                            "served_by", attempts, f"#{upstream.slot}"
+                        )
                     return response
                 except RetryBudgetExhausted as exc:
                     latency_ms = int((time.monotonic() - started) * 1000)
                     # 真实失败已记在上游状态里；跳过重试的原因已在 _call_once 单独打日志。
                     await self._record_failure(upstream, exc.last_error, latency_ms)
                     quota_seen = quota_seen or upstream.last_category == CATEGORY_QUOTA
+                    rate_limit_trace["hit"] = (
+                        rate_limit_trace["hit"]
+                        or _error_status(exc.last_error) == 429
+                    )
                     errors.append(
                         f"{upstream.name}: {self._safe_error(exc.last_error)}"
                         "（剩余预算不足，未重试）"
@@ -1175,6 +1395,9 @@ class MultiApiRouterProvider(Provider):
                     latency_ms = int((time.monotonic() - started) * 1000)
                     await self._record_failure(upstream, exc, latency_ms)
                     quota_seen = quota_seen or upstream.last_category == CATEGORY_QUOTA
+                    rate_limit_trace["hit"] = (
+                        rate_limit_trace["hit"] or _error_status(exc) == 429
+                    )
                     errors.append(f"{upstream.name}: {self._safe_error(exc)}")
                     if (
                         deadline is not None
@@ -1233,9 +1456,13 @@ class MultiApiRouterProvider(Provider):
                 )
                 fallback_response = None
             if fallback_response is not None:
+                if rate_limit_trace["hit"]:
+                    _log_rate_limit_route("fallback", attempts, "main_model")
                 return fallback_response
 
         if route_timed_out:
+            if rate_limit_trace["hit"]:
+                _log_rate_limit_route("route_timeout", attempts, "-")
             raise RuntimeError(
                 f"多 API 路由超过总时限 {self.route_timeout_seconds} 秒，"
                 f"已停止后续调用；已尝试 {attempts} 个上游。"
@@ -1256,6 +1483,8 @@ class MultiApiRouterProvider(Provider):
                 "配额类失败被聚合为普通 HTTP 429，调用方会重试而不是立即切换",
                 category=CATEGORY_QUOTA, disposition=DISPOSITION_ROTATE,
             )
+        if rate_limit_trace["hit"]:
+            _log_rate_limit_route("failed", attempts, "-")
         raise RuntimeError(
             f"多 API 路由失败，已尝试 {attempts} 个上游：{'; '.join(errors)}"
         )
