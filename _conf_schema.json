@@ -54,7 +54,7 @@
     "type": "int",
     "default": 1,
     "slider": {"min": 0, "max": 5, "step": 1},
-    "hint": "首次调用不计入重试次数，0 表示不重试。仅超时、连接错误、HTTP 408 和 5xx 原地重试。"
+    "hint": "首次调用不计入重试次数，0 表示不重试。仅 classify() 判为 retry_then_rotate 的错误（超时、连接、HTTP 408/429/5xx）原地重试；429 优先遵守 Retry-After。"
   },
   "retry_interval_seconds": {
     "description": "异常重试间隔（秒）",
