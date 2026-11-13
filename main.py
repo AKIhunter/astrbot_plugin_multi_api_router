@@ -23,6 +23,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import Provider
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, json_response, request
+from astrbot.core import sp
 from astrbot.core.agent.message import ContentPart, Message
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.entities import LLMResponse, ToolCallsResult
@@ -172,6 +173,10 @@ class RetryBudgetExhausted(RuntimeError):
 
 class RouterConfigError(RuntimeError):
     """路由配置缺陷（无可用上游、指定上游缺失等），归类为 fail_report。"""
+
+
+class BindingRollbackError(RuntimeError):
+    """下游恢复失败且回滚也未完成，不能汇报完整回滚成功。"""
 
 
 def _error_status(error: object) -> int | None:
@@ -1541,6 +1546,7 @@ class MultiApiRouterPlugin(Star):
         self._router_instances: list[MultiApiRouterProvider] = []
         self._public_provider_configs: list[dict] = []
         self._binding_lock = asyncio.Lock()
+        self._save_lock = asyncio.Lock()
         self._binding_state: dict = {"version": 1, "bindings": {}}
         self._binding_messages: list[str] = []
         self._health_results: dict[int, dict] = {}
@@ -1557,20 +1563,47 @@ class MultiApiRouterPlugin(Star):
         self._register_web_apis()
 
     async def initialize(self):
-        if not self.config.get("enabled", True):
-            logger.info("[MultiApiRouter] 插件已禁用。")
-            return
+        # 总开关只控制整体自动路由父节点；子 Provider 始终注册，
+        # 保证关闭后仍可被其他插件按 multi_api_router:upstream_N 直接点名。
         provider_id = await self._install_router_providers()
         await self._reconcile_auto_bindings()
         logger.info(
-            "[MultiApiRouter] Provider %s 已注册，已加载 %d 个上游；"
+            "[MultiApiRouter] 父 Provider %s %s，已加载 %d 个上游；"
             "指定上游 Provider %d 个。",
             provider_id,
+            "已注册" if self.config.get("enabled", True) else "已关闭（仅保留指定上游）",
             len(self.router.upstreams) if self.router else 0,
-            max(0, len(self._router_instances) - 1),
+            sum(1 for item in self._router_instances if item.pinned_slot),
         )
+        self._log_legacy_retired_slots()
         await self._verify_pinned_providers()
         self._start_auto_health_check()
+
+    def _log_legacy_retired_slots(self) -> None:
+        """旧 retired_slots 只做迁移提示，不再阻止编号复用。
+
+        删除即释放；是否可复用改由「该编号是否仍被外部引用」动态决定。
+        """
+        legacy = self._legacy_retired_slots()
+        if not legacy:
+            return
+        references = self._scan_slot_references()
+        if references is None:
+            logger.warning(
+                "[MultiApiRouter] 配置目录不可读，旧 retired_slots 的引用状态未知。"
+            )
+            return
+        blocked = [slot for slot in legacy if references.get(slot)]
+        recyclable = [
+            slot for slot in legacy
+            if not references.get(slot) and f"upstream_{slot}" not in self.config
+        ]
+        logger.info(
+            "[MultiApiRouter] 旧 retired_slots 不再永久占用编号：可回收 %s；"
+            "仍被外部引用、暂不复用 %s（保存一次上游配置后该字段会被移除）。",
+            recyclable or "无",
+            blocked or "无",
+        )
 
     async def _verify_pinned_providers(self) -> None:
         """保留线上启动自检，补齐框架初始化阶段遗漏的指定上游。"""
@@ -1691,6 +1724,42 @@ class MultiApiRouterPlugin(Star):
         } | {PROVIDER_TYPE}
 
     async def _install_router_providers(self) -> str:
+        manager = self.context.provider_manager
+        snapshot = (
+            dict(manager.inst_map), list(manager.provider_insts),
+            deepcopy(manager.providers_config), deepcopy(manager.provider_sources_config),
+            self.router, list(self._router_instances),
+            list(self._public_provider_configs),
+        )
+        self._pending_router_instances = []
+        try:
+            provider_id = await self._replace_router_providers()
+        except (Exception, asyncio.CancelledError):
+            # 新实例构造或注册失败时，旧实例尚未关闭，原注册表可直接恢复。
+            manager.inst_map.clear()
+            manager.inst_map.update(snapshot[0])
+            manager.provider_insts[:] = snapshot[1]
+            manager.providers_config[:] = snapshot[2]
+            manager.provider_sources_config[:] = snapshot[3]
+            self.router = snapshot[4]
+            self._router_instances = snapshot[5]
+            self._public_provider_configs = snapshot[6]
+            for inst in self._pending_router_instances:
+                await self._close_router_instance(inst)
+            raise
+        finally:
+            self._pending_router_instances = []
+        stale = list(snapshot[5])
+        for inst in snapshot[0].values():
+            if isinstance(inst, MultiApiRouterProvider) and inst not in stale:
+                stale.append(inst)
+        if snapshot[4] is not None and snapshot[4] not in stale:
+            stale.append(snapshot[4])
+        for inst in stale:
+            await self._close_router_instance(inst)
+        return provider_id
+
+    async def _replace_router_providers(self) -> str:
         """注册「整体」和「每个上游」两类 AstrBot Provider。
 
         两类实例使用同一个 Provider 类与同一套 text_chat 接口，区别只在
@@ -1702,18 +1771,10 @@ class MultiApiRouterPlugin(Star):
         for pid, inst in list(provider_manager.inst_map.items()):
             if isinstance(inst, MultiApiRouterProvider) and inst not in stale_instances:
                 stale_instances.append(inst)
-        for existing in stale_instances:
-            if existing in provider_manager.provider_insts:
-                provider_manager.provider_insts.remove(existing)
-            existing_id = existing.meta().id
-            if provider_manager.inst_map.get(existing_id) is existing:
-                del provider_manager.inst_map[existing_id]
-            await self._close_router_instance(existing)
-        self._router_instances = []
-
         overall_config = dict(self.config)
         overall_config["display_name"] = "多 API 路由（自动）"
         router = MultiApiRouterProvider(overall_config)
+        self._pending_router_instances.append(router)
         provider_id = router.meta().id
         existing = provider_manager.inst_map.get(provider_id)
         if existing is not None:
@@ -1723,16 +1784,17 @@ class MultiApiRouterPlugin(Star):
                     f"Provider ID {provider_id} 已被其他类型占用，"
                     "请修改多 API 路由插件的 provider_id。"
                 )
-            if existing in provider_manager.provider_insts:
-                provider_manager.provider_insts.remove(existing)
-            if provider_manager.inst_map.get(provider_id) is existing:
-                del provider_manager.inst_map[provider_id]
-            await self._close_router_instance(existing)
+            if existing not in stale_instances:
+                stale_instances.append(existing)
 
         router.health_lookup = self._health_results.get
         router.health_recorder = self._record_health_success
         router.fallback_resolver = self._resolve_fallback_provider
-        instances = [router]
+        # 总开关只决定是否注册父 Provider（整体自动路由入口）：
+        # 关闭时撤销 multi_api_router 节点，但下面每个上游的子 Provider 照常注册，
+        # 其他插件仍可用 multi_api_router:upstream_N 直接点名调用。
+        router_enabled = bool(self.config.get("enabled", True))
+        instances = [router] if router_enabled else []
         # 保留线上 source 名称映射，重载时排除本插件旧 source，避免追加后缀。
         used_source_ids = {
             str(item.get("id") or "") for item in provider_manager.providers_config
@@ -1742,16 +1804,18 @@ class MultiApiRouterPlugin(Star):
             str(item.get("id") or "") for item in provider_manager.provider_sources_config
             if isinstance(item, dict) and item.get("type") != PROVIDER_TYPE
         }
-        entries = [
-            self._provider_entry(
-                provider_id,
-                "automatic",
-                display_name="多 API 路由（自动）",
-                provider_source_id=self._provider_source_id(
-                    "多 API 路由（自动）", 0, used_source_ids
-                ),
+        entries = []
+        if router_enabled:
+            entries.append(
+                self._provider_entry(
+                    provider_id,
+                    "automatic",
+                    display_name="多 API 路由（自动）",
+                    provider_source_id=self._provider_source_id(
+                        "多 API 路由（自动）", 0, used_source_ids
+                    ),
+                )
             )
-        ]
 
         # 所有配置完整的聊天兼容 API 都注册直连 Provider；“启用路由”只影响
         # 整体自动候选链，不影响调用方固定选择某个 API。
@@ -1763,6 +1827,7 @@ class MultiApiRouterPlugin(Star):
             pinned_config["display_name"] = self._upstream_provider_label(upstream)
             pinned_config["parent_provider_id"] = provider_id
             pinned = MultiApiRouterProvider(pinned_config)
+            self._pending_router_instances.append(pinned)
             pinned.health_lookup = self._health_results.get
             pinned.health_recorder = self._record_health_success
             # 指定上游模式不自动降级，也不回退主模型。
@@ -1781,6 +1846,13 @@ class MultiApiRouterPlugin(Star):
                 )
             )
 
+        # 所有实例准备完成后再替换；这段不 await，避免暴露半个注册表。
+        for existing in stale_instances:
+            if existing in provider_manager.provider_insts:
+                provider_manager.provider_insts.remove(existing)
+            existing_id = existing.meta().id
+            if provider_manager.inst_map.get(existing_id) is existing:
+                del provider_manager.inst_map[existing_id]
         for inst in instances:
             self.context.register_provider(inst)
             provider_manager.inst_map[inst.meta().id] = inst
@@ -1983,7 +2055,60 @@ class MultiApiRouterPlugin(Star):
         os.chmod(temp_path, 0o600)
         temp_path.replace(self._state_path)
 
+    @staticmethod
+    async def _persist_plugin_config(config) -> None:
+        save_async = getattr(config, "save_config_async", None)
+        if callable(save_async):
+            if await save_async() is False:
+                raise RuntimeError("配置快照未提交")
+        else:
+            config.save_config()
+
+    def _binding_checkpoint(self):
+        if not hasattr(self, "_binding_state"):
+            return None
+        configs = {}
+        for name in AUTO_BIND_TARGETS:
+            metadata = self._find_plugin_metadata(name)
+            if metadata is not None and metadata.config is not None:
+                config = metadata.config
+                configs[id(config)] = (config, deepcopy(dict(config)))
+        return (
+            deepcopy(self._binding_state),
+            list(getattr(self, "_binding_messages", [])),
+            list(configs.values()),
+        )
+
+    async def _rollback_bindings(self, checkpoint) -> None:
+        if checkpoint is None:
+            return
+        state, messages, configs = checkpoint
+        failures = []
+        for config, original in configs:
+            if dict(config) == original:
+                continue
+            config.clear()
+            config.update(original)
+            try:
+                await self._persist_plugin_config(config)
+            except Exception:
+                failures.append("下游配置")
+        changed = self._binding_state != state
+        self._binding_state.clear()
+        self._binding_state.update(state)
+        self._binding_messages = messages
+        if changed:
+            try:
+                self._save_binding_state()
+            except Exception:
+                failures.append("绑定记录")
+        if failures:
+            raise RuntimeError("绑定回滚未完成")
+
     def _auto_bind_ready(self) -> bool:
+        if not self.config.get("enabled", True):
+            # 父 Provider 被撤销时不能把下游任务指向不存在的 multi_api_router。
+            return False
         if not self.config.get("auto_bind_enabled", True):
             return False
         require_ready = self.config.get("auto_bind_require_ready_upstream", True)
@@ -2049,6 +2174,8 @@ class MultiApiRouterPlugin(Star):
             return []
         only_empty = self.config.get("auto_bind_only_empty", True)
         bindings = self._binding_state["bindings"]
+        original_config = deepcopy(dict(config))
+        original_bindings = deepcopy(bindings)
         changed = False
         messages: list[str] = []
         for path in target["paths"]:
@@ -2092,21 +2219,35 @@ class MultiApiRouterPlugin(Star):
             messages.append(f"{plugin_name}.{'.'.join(path)}：已自动绑定")
 
         if changed:
-            save_async = getattr(config, "save_config_async", None)
-            if callable(save_async):
-                await save_async()
-            else:
-                config.save_config()
-            self._save_binding_state()
+            persisted = False
+            try:
+                await self._persist_plugin_config(config)
+                persisted = True
+                self._save_binding_state()
+            except (Exception, asyncio.CancelledError):
+                config.clear()
+                config.update(original_config)
+                bindings.clear()
+                bindings.update(original_bindings)
+                if persisted:
+                    try:
+                        await self._persist_plugin_config(config)
+                    except Exception as rollback_error:
+                        raise BindingRollbackError("下游绑定回滚未完成") from rollback_error
+                raise
         return messages
 
     async def _restore_auto_bindings(self) -> list[str]:
         bindings = self._binding_state.get("bindings", {})
+        if not bindings:
+            return []
         messages: list[str] = []
         changed_configs: dict[int, Any] = {}
+        originals = {}
+        removed = []
         for key, record in list(bindings.items()):
             if not isinstance(record, dict):
-                del bindings[key]
+                removed.append(key)
                 continue
             plugin_name = str(record.get("plugin") or "")
             metadata = self._find_plugin_metadata(plugin_name)
@@ -2114,10 +2255,13 @@ class MultiApiRouterPlugin(Star):
                 continue
             path = tuple(str(item) for item in record.get("path", []))
             if not path:
-                del bindings[key]
+                removed.append(key)
                 continue
             current = self._get_path(metadata.config, path)
             if current == record.get("applied"):
+                originals.setdefault(
+                    id(metadata.config), deepcopy(dict(metadata.config))
+                )
                 self._set_path(metadata.config, path, record.get("original", ""))
                 changed_configs[id(metadata.config)] = metadata.config
                 messages.append(f"{plugin_name}.{'.'.join(path)}：已恢复")
@@ -2125,18 +2269,42 @@ class MultiApiRouterPlugin(Star):
                 messages.append(
                     f"{plugin_name}.{'.'.join(path)}：已有手动修改，未覆盖"
                 )
-            del bindings[key]
-        for config in changed_configs.values():
-            save_async = getattr(config, "save_config_async", None)
-            if callable(save_async):
-                await save_async()
-            else:
-                config.save_config()
-        self._save_binding_state()
+            removed.append(key)
+        original_bindings = deepcopy(bindings)
+        persisted = []
+        try:
+            for config in changed_configs.values():
+                await self._persist_plugin_config(config)
+                persisted.append(config)
+            # 下游都成功落盘后才移除记录；失败必须仍能再次恢复。
+            for key in removed:
+                bindings.pop(key, None)
+            self._save_binding_state()
+        except (Exception, asyncio.CancelledError):
+            bindings.clear()
+            bindings.update(original_bindings)
+            for identity, config in changed_configs.items():
+                config.clear()
+                config.update(originals[identity])
+            failures = []
+            for config in persisted:
+                try:
+                    await self._persist_plugin_config(config)
+                except Exception as rollback_error:
+                    # 一个目标回滚失败也要继续恢复其余目标，并把失败传给保存事务。
+                    failures.append(rollback_error)
+            if failures:
+                raise BindingRollbackError("下游绑定回滚未完成") from failures[0]
+            raise
         return messages
 
     async def _reconcile_auto_bindings(self) -> None:
         async with self._binding_lock:
+            if not self.config.get("enabled", True):
+                # 父节点撤回时必须回退裸 multi_api_router 绑定，
+                # 否则 BiliBot / memewiki 会指向一个不存在的 Provider。
+                self._binding_messages = await self._restore_auto_bindings()
+                return
             if not self.config.get("auto_bind_enabled", True):
                 if self.config.get("auto_bind_restore_on_disable", True):
                     self._binding_messages = await self._restore_auto_bindings()
@@ -2159,6 +2327,10 @@ class MultiApiRouterPlugin(Star):
     @filter.on_plugin_loaded()
     async def auto_bind_loaded_plugin(self, metadata: StarMetadata):
         if not metadata.name:
+            return
+        if not self.config.get("enabled", True):
+            async with self._binding_lock:
+                self._binding_messages = await self._restore_auto_bindings()
             return
         if not self.config.get("auto_bind_enabled", True):
             if self.config.get("auto_bind_restore_on_disable", True):
@@ -2214,10 +2386,10 @@ class MultiApiRouterPlugin(Star):
             "保存模型 API 上游配置",
         )
 
-    def _retired_slots(self) -> list[int]:
-        """已删除（退役）的槽位号：新增上游时永不复用，避免旧引用静默指向新上游。
+    def _legacy_retired_slots(self) -> list[int]:
+        """旧版本的 retired_slots：只用于迁移提示，不再阻止编号复用。
 
-        旧配置没有该字段时视为空列表；非法值直接忽略，保证向后兼容。
+        旧配置没有该字段时视为空列表；非法值直接忽略。
         """
         raw = self.config.get("retired_slots")
         if not isinstance(raw, list):
@@ -2231,6 +2403,135 @@ class MultiApiRouterPlugin(Star):
             if 1 <= slot <= MAX_UPSTREAMS:
                 slots.add(slot)
         return sorted(slots)
+
+    @staticmethod
+    def _iter_json_strings(value: Any, path: str = "$"):
+        """递归遍历 JSON，产出 ``(路径, 字符串值)``，用于定位外部引用。"""
+        if isinstance(value, str):
+            yield path, value
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                yield from MultiApiRouterPlugin._iter_json_strings(
+                    item, f"{path}.{key}"
+                )
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                yield from MultiApiRouterPlugin._iter_json_strings(
+                    item, f"{path}[{index}]"
+                )
+
+    def _external_config_dir(self) -> Path:
+        """外部引用的扫描目录；测试可注入 ``_config_dir`` 覆盖。"""
+        override = getattr(self, "_config_dir", None)
+        if override:
+            return Path(override)
+        return Path(get_astrbot_data_path()) / "config"
+
+    @staticmethod
+    def _slot_configured(raw: Any) -> bool:
+        # 关闭自动路由的完整 pinned 槽位仍在使用，不能当成空槽。
+        return isinstance(raw, Mapping) and all(
+            str(raw.get(key) or "").strip()
+            for key in ("api_base", "api_key", "model")
+        )
+
+    def _scan_slot_references(self) -> dict[int, list[str]] | None:
+        """扫描其他插件配置中写死的 ``multi_api_router:upstream_N`` 引用。
+
+        槽位删除后即释放，但 ``:upstream_N`` 可能被 LivingHello、LivingEmotion、
+        AB 档案、BiliBot 等以 pinned ID 保存。复用该编号会让旧引用静默指向新
+        模型，因此只把「没有任何外部引用」的编号视为可安全复用。
+        返回 ``{槽位号: ["文件名$.字段路径", ...]}``；本插件自身配置不参与扫描。
+        核对不完整时返回 None；普通编辑仍可保存，但不得复用编号。
+        """
+        references: dict[int, list[str]] = {}
+        pattern = re.compile(
+            rf"{re.escape(PROVIDER_TYPE)}:upstream_(\d+)(?!\d)"
+        )
+        try:
+            directory = self._external_config_dir()
+            # iterdir 会实际读取目录；glob 对缺失目录返回空列表，不能用来验可读性。
+            paths = sorted(
+                path for path in directory.iterdir() if path.suffix == ".json"
+            )
+            main_config = Path(getattr(
+                self, "_main_config_path",
+                Path(get_astrbot_data_path()) / "cmd_config.json",
+            ))
+            paths.append(main_config)
+        except Exception:
+            return None
+        for path in paths:
+            # 跳过本插件配置及其备份副本，避免自身配置造成误报。
+            if path.name.startswith(PLUGIN_NAME):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                if not isinstance(data, Mapping):
+                    return None
+            except Exception:
+                # 无法确认该文件是否保存旧引用，禁止把未知状态当成“没有引用”。
+                return None
+            if path == main_config:
+                # Provider 定义本身不是消费者选择，不能把注册 ID 当作外部引用。
+                data = {
+                    key: value for key, value in data.items()
+                    if key not in {"provider", "provider_sources"}
+                }
+            for location, text in self._iter_json_strings(data):
+                for match in pattern.finditer(text):
+                    slot = int(match.group(1))
+                    if 1 <= slot <= MAX_UPSTREAMS:
+                        references.setdefault(slot, []).append(
+                            f"{path.name}{location}"
+                        )
+        return references
+
+    async def _collect_slot_references(self) -> dict[int, list[str]] | None:
+        """合并配置与宿主持久化选择；只查询聊天 Provider 对应的键。"""
+        references = self._scan_slot_references()
+        if references is None:
+            return None
+        try:
+            for scope, scope_id, key in (
+                ("umo", None, "provider_perf_chat_completion"),
+                ("global", "global", "curr_provider"),
+            ):
+                preferences = await sp.range_get_async(scope, scope_id, key)
+                for preference in preferences:
+                    value = preference.value["val"]
+                    for _, text in self._iter_json_strings(value):
+                        if not text.startswith(PINNED_PROVIDER_PREFIX):
+                            continue
+                        suffix = text[len(PINNED_PROVIDER_PREFIX):]
+                        if suffix.isdecimal() and 1 <= int(suffix) <= MAX_UPSTREAMS:
+                            # 定位到字段即可；不把会话标识或任何正文写到页面/日志。
+                            references.setdefault(int(suffix), []).append(
+                                f"宿主偏好:{scope}.{key}"
+                            )
+        except Exception:
+            return None
+        return references
+
+    async def _slot_reference_data(self) -> dict:
+        references = await self._collect_slot_references()
+        free_slots = {
+            slot for slot in range(1, MAX_UPSTREAMS + 1)
+            if not self._slot_configured(self.config.get(f"upstream_{slot}"))
+        }
+        blocked = sorted(
+            free_slots if references is None else free_slots.intersection(references)
+        )
+        return {
+            "reference_check_complete": references is not None,
+            "blocked_slots": blocked,
+            "blocked_slot_references": {
+                str(slot): references[slot] for slot in blocked
+            } if references is not None else {},
+        }
+
+    def _slot_references(self, slot: int) -> list[str]:
+        return (self._scan_slot_references() or {}).get(int(slot), [])
 
     def _render_slots(self) -> list[int]:
         """要展示给控制台的槽位号：至少 MIN_UPSTREAMS 个基础槽位，
@@ -2529,6 +2830,7 @@ class MultiApiRouterPlugin(Star):
         }
 
     async def api_upstreams(self):
+        reference_data = await self._slot_reference_data()
         return json_response(
             {
                 "provider_id": (
@@ -2538,7 +2840,8 @@ class MultiApiRouterPlugin(Star):
                     len(self.router.upstreams) if self.router else 0
                 ),
                 "strategy": self._strategy_data(),
-                "retired_slots": self._retired_slots(),
+                # 删除即释放的编号若仍被其他插件引用，暂不参与复用。
+                **reference_data,
                 "upstreams": [
                     self._upstream_public_data(slot) for slot in self._render_slots()
                 ],
@@ -2821,6 +3124,7 @@ class MultiApiRouterPlugin(Star):
             )
         # 整体 ID 恒定，配置里即使残留旧值也不影响展示与运行时。
         global_fields["provider_id"] = PROVIDER_TYPE
+        reference_data = await self._slot_reference_data()
         return json_response(
             {
                 "provider_id": (
@@ -2831,7 +3135,8 @@ class MultiApiRouterPlugin(Star):
                 ),
                 "strategy": self._strategy_data(),
                 "global": global_fields,
-                "retired_slots": self._retired_slots(),
+                # 已释放但仍被外部引用的编号：页面新增时应跳过并给出提示。
+                **reference_data,
                 "upstreams": [
                     self._upstream_full_data(
                         slot,
@@ -2983,7 +3288,10 @@ class MultiApiRouterPlugin(Star):
             parsed = int(self.config.get(key, default) or default)
         return max(low, min(high, parsed))
 
-    def _coerce_upstream_payload(self, slot: int, raw: Any) -> dict:
+    def _coerce_upstream_payload(
+        self, slot: int, raw: Any, *, config: Mapping | None = None,
+    ) -> dict:
+        existing_config = self.config if config is None else config
         if raw is None:
             return {"enabled": False}
         if not isinstance(raw, dict):
@@ -3000,7 +3308,7 @@ class MultiApiRouterPlugin(Star):
         api_base = str(raw.get("api_base") or "").strip()[:2048]
         # 页面默认回显掩码。用户未编辑就直接保存时沿用已存密钥，
         # 否则会把真 Key 覆盖成 "****"；掩码形态或与当前掩码一致都算未编辑。
-        existing_raw = self.config.get(f"upstream_{slot}")
+        existing_raw = existing_config.get(f"upstream_{slot}")
         existing_raw = existing_raw if isinstance(existing_raw, dict) else {}
         existing_key = str(existing_raw.get("api_key") or "").strip()
         submitted_key = raw.get("api_key")
@@ -3038,7 +3346,7 @@ class MultiApiRouterPlugin(Star):
         if "enable_thinking" in raw:
             enable_thinking = bool(raw.get("enable_thinking", False))
         else:
-            existing = self.config.get(f"upstream_{slot}")
+            existing = existing_config.get(f"upstream_{slot}")
             enable_thinking = MultiApiRouterProvider._enable_thinking_value(
                 existing if isinstance(existing, dict) else {}
             )
@@ -3050,7 +3358,7 @@ class MultiApiRouterPlugin(Star):
         # 避免热重载/保存时把上游自定义请求体（如 {"enable_thinking": false}）静默清空。
         extra_body = raw.get("extra_body")
         if extra_body is None:
-            existing = self.config.get(f"upstream_{slot}")
+            existing = existing_config.get(f"upstream_{slot}")
             if isinstance(existing, dict):
                 extra_body = existing.get("extra_body")
         result = {
@@ -3071,10 +3379,18 @@ class MultiApiRouterPlugin(Star):
         return result
 
     async def _reload_router(self) -> None:
-        """配置变更后热重载：整体与指定上游 Provider 一起重建，避免重启 AstrBot。"""
+        """配置变更后热重载：与冷启动一致，按总开关决定父节点是否注册。
+
+        子 Provider 始终重建；关闭自动路由时撤掉父节点并回退被自动写入的
+        裸 multi_api_router 绑定，保证热重载与重启后的行为完全相同。
+        """
         await self._install_router_providers()
+        # 绑定恢复也是生效条件；失败交给保存事务回滚，不能虚报全部成功。
+        await self._reconcile_auto_bindings()
         logger.info(
-            "[MultiApiRouter] 配置已保存并热重载，当前 %d 个上游，%d 个 Provider。",
+            "[MultiApiRouter] 配置已保存并热重载：父 Provider %s，当前 %d 个上游，"
+            "%d 个 Provider。",
+            "已注册" if self.config.get("enabled", True) else "已关闭",
             len(self.router.upstreams) if self.router else 0,
             len(self._router_instances),
         )
@@ -3090,7 +3406,15 @@ class MultiApiRouterPlugin(Star):
         if unknown:
             return error_response(f"包含不支持的配置项: {sorted(unknown)}", status_code=400)
 
+        # 同一个事务完成前，不允许第二次保存交叉清理 Provider 或写回配置。
+        if not hasattr(self, "_save_lock"):
+            self._save_lock = asyncio.Lock()
+        async with self._save_lock:
+            return await self._save_upstreams(payload)
+
+    async def _save_upstreams(self, payload: dict):
         try:
+            candidate = deepcopy(dict(self.config))
             global_update = payload.get("global", {})
             if not isinstance(global_update, dict):
                 raise ValueError("global 必须是对象")
@@ -3102,30 +3426,79 @@ class MultiApiRouterPlugin(Star):
             ):
                 if key in global_update:
                     global_update[key] = self._validate_timing_value(key, global_update[key])
-            # 0. 处理待删除的槽位
+            # 0. 先完整校验删除清单与「复用编号」的外部引用，再改任何配置。
+            delete_slots: set[int] = set()
             if "delete_slots" in payload:
-                delete_slots = payload["delete_slots"]
-                if not isinstance(delete_slots, list):
+                raw_slots = payload["delete_slots"]
+                if not isinstance(raw_slots, list):
                     raise ValueError("delete_slots 必须是数组")
-                for raw_slot in delete_slots:
+                for raw_slot in raw_slots:
                     try:
                         slot = int(raw_slot)
                     except (TypeError, ValueError):
                         raise ValueError(f"delete_slots 含非法编号: {raw_slot}")
                     if slot < 1 or slot > MAX_UPSTREAMS:
-                        raise ValueError(f"上游编号必须在 1 到 {MAX_UPSTREAMS} 之间。")
-                    key = f"upstream_{slot}"
-                    if key in self.config:
-                        del self.config[key]
-                        # 删除即退役：编号不再复用，防止其他插件保存的旧
-                        # multi_api_router:upstream_N 静默指向一个新上游。
-                        retired = self._retired_slots()
-                        if slot not in retired:
-                            retired.append(slot)
-                        self.config["retired_slots"] = sorted(retired)
-                    self._health_results.pop(slot, None)
+                        raise ValueError(
+                            f"上游编号必须在 1 到 {MAX_UPSTREAMS} 之间。"
+                        )
+                    delete_slots.add(slot)
 
-            # 1. 校验并写入内存配置
+            # 删除即释放，新增优先复用最小空闲编号。复用前必须确认该编号没有被
+            # 其他插件以 multi_api_router:upstream_N（pinned ID）保存，否则旧
+            # 引用会静默指向新模型。默认安全：有引用就拒绝，不提供强制复用。
+            requested_slots = [
+                slot for slot in range(1, MAX_UPSTREAMS + 1)
+                if f"upstream_{slot}" in payload
+            ]
+            # 先在副本上删除、校验全部上游；沿用密钥时也只能读这个副本，
+            # 不能把“删除再新增”的条目误当作原条目的密钥继续沿用。
+            for slot in delete_slots:
+                candidate.pop(f"upstream_{slot}", None)
+            for slot in requested_slots:
+                key = f"upstream_{slot}"
+                candidate[key] = self._coerce_upstream_payload(
+                    slot, payload[key], config=candidate,
+                )
+            reused_slots = sorted(
+                slot for slot in requested_slots
+                if (slot in delete_slots or not self._slot_configured(
+                    self.config.get(f"upstream_{slot}")
+                )) and self._slot_configured(candidate[f"upstream_{slot}"])
+            )
+            references = await self._collect_slot_references() if reused_slots else {}
+            if reused_slots and references is None:
+                raise ValueError(
+                    "外部引用核对不完整（配置目录、宿主配置或会话偏好不可读），"
+                    "已拒绝复用编号；请检查数据完整性与权限后重试。"
+                )
+            references = references or {}
+            conflicts = {
+                slot: references[slot]
+                for slot in reused_slots
+                if references.get(slot)
+            }
+            if conflicts:
+                logger.warning(
+                    "[MultiApiRouter] 拒绝复用仍被外部引用的槽位 %s；"
+                    "引用位置（最多列 3 条）：%s",
+                    sorted(conflicts),
+                    {
+                        slot: locations[:3]
+                        for slot, locations in conflicts.items()
+                    },
+                )
+                details = "；".join(
+                    f"#{slot}（{', '.join(locations[:3])}"
+                    + (" 等" if len(locations) > 3 else "")
+                    + "）"
+                    for slot, locations in conflicts.items()
+                )
+                raise ValueError(
+                    f"以下编号仍被其他插件引用，已拒绝复用：{details}。"
+                    "请先在这些插件里改用其他上游或解除引用；本次保存未生效。"
+                )
+
+            # 全部校验完成前只修改副本；错误请求不能污染下一次合法保存。
             if "global" in payload:
                 allowed_global = {
                     "enabled", "provider_id", "request_timeout_seconds",
@@ -3152,39 +3525,35 @@ class MultiApiRouterPlugin(Star):
                                 PROVIDER_TYPE,
                                 submitted,
                             )
-                        self.config["provider_id"] = PROVIDER_TYPE
+                        candidate["provider_id"] = PROVIDER_TYPE
                     elif key == "enabled":
-                        self.config["enabled"] = bool(value)
+                        candidate["enabled"] = bool(value)
                     elif key == "history_image_compaction_enabled":
-                        self.config[key] = bool(value)
+                        candidate[key] = bool(value)
                     elif key in self.GLOBAL_INT_FIELDS:
-                        self.config[key] = self._coerce_global_int(key, value)
+                        candidate[key] = self._coerce_global_int(key, value)
                     elif key in self.GLOBAL_FLOAT_FIELDS:
-                        self.config[key] = value
+                        candidate[key] = value
                     # 新增策略项：布尔开关与回退 Provider ID（空字符串表示用默认主模型）。
                     elif key == "skip_unhealthy_upstreams":
-                        self.config[key] = bool(value)
+                        candidate[key] = bool(value)
                     elif key == "fallback_to_main_model":
-                        self.config[key] = bool(value)
+                        candidate[key] = bool(value)
                     elif key == "fallback_provider_id":
-                        self.config[key] = str(value or "").strip()[:128]
+                        candidate[key] = str(value or "").strip()[:128]
                     else:
                         raise ValueError(f"不支持的全局字段: {key}")
-            for slot in range(1, MAX_UPSTREAMS + 1):
-                key = f"upstream_{slot}"
-                if key in payload:
-                    self.config[key] = self._coerce_upstream_payload(slot, payload[key])
+            # 旧 retired_slots 迁移：编号改为删除即释放，不再永久退役。
+            # 这里只移除旧字段；仍被外部引用的编号由 _scan_slot_references
+            # 动态阻断复用，不会因为字段移除而变得不安全。
+            candidate.pop("retired_slots", None)
 
-            # 2. 落盘（AstrBotConfig.save_config 原子写 + fsync）
-            self.config.save_config()
-
-            # 3. 热重载 router 使新配置立即生效
-            await self._reload_router()
+            await self._commit_upstream_config(candidate, delete_slots)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
-        except Exception as exc:
+        except Exception:
             logger.exception("[MultiApiRouter] 保存上游配置失败")
-            return error_response(f"保存失败: {exc}", status_code=500)
+            return error_response("保存或生效失败，请查看日志中的回滚结果。", status_code=500)
 
         return json_response(
             {
@@ -3194,12 +3563,68 @@ class MultiApiRouterPlugin(Star):
             }
         )
 
+    async def _commit_upstream_config(self, candidate: dict, delete_slots: set[int]):
+        original = deepcopy(dict(self.config))
+        health = deepcopy(self._health_results)
+        old_router = self.router
+        binding_checkpoint = self._binding_checkpoint()
+        persisted = False
+        reloading = False
+        try:
+            self.config.clear()
+            self.config.update(candidate)
+            self.config.save_config()
+            persisted = True
+            for slot in delete_slots:
+                self._health_results.pop(slot, None)
+            reloading = True
+            await self._reload_router()
+        except (Exception, asyncio.CancelledError) as exc:
+            self.config.clear()
+            self.config.update(original)
+            self._health_results.clear()
+            self._health_results.update(health)
+            failures = ["下游绑定"] if isinstance(exc, BindingRollbackError) else []
+            if persisted:
+                try:
+                    self.config.save_config()
+                except Exception:
+                    failures.append("配置落盘")
+            try:
+                await self._rollback_bindings(binding_checkpoint)
+            except Exception:
+                failures.append("下游绑定")
+            if reloading:
+                manager = getattr(getattr(self, "context", None), "provider_manager", None)
+                try:
+                    if manager is not None:
+                        # 只恢复 Provider，不重新触发任何自动绑定动作。
+                        await self._install_router_providers()
+                    else:
+                        self.router = old_router
+                except Exception:
+                    failures.append("Provider")
+            logger.warning(
+                "[MultiApiRouter] 保存失败，回滚%s。",
+                "未完成：" + "、".join(failures) if failures else "完成",
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            # 生效阶段的 ValueError 也是服务错误，不得伪装成校验阶段的 400。
+            raise RuntimeError("上游配置提交失败") from exc
+
     @filter.command("模型路由状态")
     async def router_status(self, event: AstrMessageEvent):
         if self.router is None:
             yield event.plain_result("多 API 路由 Provider 当前未启用。")
             return
         lines = self.router.status_lines()
+        if not self.config.get("enabled", True):
+            lines.insert(
+                0,
+                "父 Provider（整体自动路由）已关闭；"
+                "其他插件仍可直接选择 multi_api_router:upstream_N。",
+            )
         lines.append("自动绑定：")
         lines.extend(self._binding_messages or ["尚无绑定记录。"])
         yield event.plain_result("\n".join(lines))
@@ -3235,6 +3660,12 @@ class MultiApiRouterPlugin(Star):
     async def binding_preview(self, event: AstrMessageEvent):
         if self.router is None:
             yield event.plain_result("多 API 路由 Provider 当前未启用。")
+            return
+        if not self.config.get("enabled", True):
+            yield event.plain_result(
+                "父 Provider（整体自动路由）已关闭，自动绑定已回退；"
+                "重新开启后才能再次绑定。"
+            )
             return
         if not self.router.upstreams and self.config.get(
             "auto_bind_require_ready_upstream", True

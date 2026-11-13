@@ -150,8 +150,9 @@
             <p>该 ID 已锁定为只读：它是所有下游插件引用路由的固定标识，修改会导致它们找不到 Provider。</p>
           </section>
           <section>
-            <h3>启用路由 Provider</h3>
-            <p>关闭后，整体模式和各个指定上游 Provider 都不会参与调用。适合临时停用整套路由，而不是逐条关闭 API。</p>
+            <h3>启用自动路由（父 Provider）</h3>
+            <p>开启时注册 <code>multi_api_router</code> 自动路由节点，其他插件选择它后按右侧从上到下的顺序尝试已启用路由的聊天兼容 API。</p>
+            <p>关闭后整体自动路由入口消失，已自动写入的下游绑定（如 BiliBot 后台任务、memewiki 门控）会回退为绑定前的原值；各上游仍注册为 <code>multi_api_router:upstream_N</code>，可被其他插件直接指定，不受影响。</p>
           </section>
           <section>
             <h3>回退主模型</h3>
@@ -217,7 +218,7 @@
           <section>
             <h3>指定某个上游</h3>
             <p>其他插件的模型选择器会直接显示上游名称和模型，不展示内部路由前缀。选中后只走该 API，不自动切换，也不回退主模型。</p>
-            <p>每行左侧的 <code>#编号</code> 是固定槽位号（例如 <code>#12</code> 对应 <code>multi_api_router:upstream_12</code>），拖拽排序或删除其他条目都不会改变它；其他插件引用时用的就是这个编号。已删除的编号会退役，不会被新条目复用。</p>
+            <p>每行左侧的 <code>#编号</code> 是固定槽位号（例如 <code>#12</code> 对应 <code>multi_api_router:upstream_12</code>），拖拽排序或删除其他条目都不会改变它；其他插件引用时用的就是这个编号。删除条目后编号立即释放，新增时优先复用最小空闲编号；若该编号仍被其他插件引用（如 AB 档案、BiliBot、LivingHello / LivingEmotion），会自动跳过并写日志，避免旧引用指向新模型。</p>
           </section>
           <section>
             <h3>常见搭配示例</h3>

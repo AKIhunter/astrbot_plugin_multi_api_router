@@ -30,7 +30,12 @@ const CHAT_COMPATIBLE_TYPES = new Set(["chat", "image_to_text", "multimodal"]);
 
 // 页面只保留需要经常改的策略项；并发和输出预算等仍在 AstrBot 插件配置里。
 const GLOBAL_FIELDS = [
-  { key: "enabled", label: "启用路由 Provider", type: "checkbox" },
+  {
+    key: "enabled",
+    label: "启用自动路由（父 Provider）",
+    type: "checkbox",
+    hint: "关闭后整体自动路由入口（multi_api_router）消失，已自动写入的下游绑定会回退原值；各上游仍注册为 multi_api_router:upstream_N，可被直接指定。",
+  },
   {
     key: "provider_id",
     label: "整体模式 Provider ID（固定，不可修改）",
@@ -670,13 +675,18 @@ async function checkUpstream(slot, ...buttons) {
 }
 
 function addUpstream() {
-  // 已删除的槽位是「退役」编号，永不复用：避免别处保存的旧引用静默指向新上游。
-  const retired = new Set((state.retired_slots || []).map(Number));
+  if (state.reference_check_complete === false) {
+    showToast("外部引用核对不完整，暂不能新增或复用编号；已有上游仍可编辑。", true);
+    return;
+  }
+  // 槽位删除即释放，新增优先复用最小空闲编号；仍被其他插件以
+  // multi_api_router:upstream_N 引用的编号会被后端拒绝复用，页面提前跳过。
+  const blocked = new Set((state.blocked_slots || []).map(Number));
   // 优先复用配置里已存在但页面隐藏的空槽位（历史备份槽位），
   // 避免直接顶到 20 个上限而无法新增。
   const reusable = state.upstreams.find(
     (item) => !item.route_enabled && !item.configured
-      && !addedSlots.has(item.slot) && !retired.has(Number(item.slot)),
+      && !addedSlots.has(item.slot) && !blocked.has(Number(item.slot)),
   );
   if (reusable) {
     captureOperationSnapshot();
@@ -695,14 +705,17 @@ function addUpstream() {
   const used = new Set(state.upstreams.map((item) => item.slot));
   let nextSlot = 0;
   for (let slot = 1; slot <= MAX_UPSTREAMS; slot += 1) {
-    if (!used.has(slot) && !retired.has(slot)) {
+    if (!used.has(slot) && !blocked.has(slot)) {
       nextSlot = slot;
       break;
     }
   }
   if (!nextSlot) {
+    const blockedHint = blocked.size
+      ? `；编号 ${[...blocked].sort((a, b) => a - b).map((slot) => `#${slot}`).join("、")} 仍被其他插件引用，不会自动复用`
+      : "";
     showToast(
-      `没有可用槽位：${MAX_UPSTREAMS} 个编号均已占用或已退役（删除过的编号不会复用）`,
+      `没有可用槽位：${MAX_UPSTREAMS} 个编号均已占用${blockedHint}`,
       true,
     );
     return;
@@ -736,7 +749,11 @@ function deleteUpstream(slot) {
   if (index < 0) return;
   const item = state.upstreams[index];
   const label = item.name || upstreamLabel(slot);
-  confirmDialog(`确定删除上游「${label}」吗？此操作需点击「保存全部」后生效。`).then(
+  confirmDialog(
+    `确定删除上游「${label}」吗？删除后编号 #${slot} 会释放，可被新条目复用；`
+    + "若该编号仍被其他插件引用，新条目不会自动使用它。"
+    + "此操作需点击「保存全部」后生效。",
+  ).then(
     (ok) => {
       if (!ok) return;
       captureOperationSnapshot();

@@ -31,6 +31,9 @@ def upstream(
 class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.providers = []
+        self.enterContext(mock.patch.object(
+            router_module.sp, "range_get_async", new=mock.AsyncMock(return_value=[]),
+        ))
 
     def build_provider(self, config):
         base = {
@@ -781,7 +784,7 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(default_provider.max_input_chars, 262144)
         self.assertEqual(custom_provider.max_input_chars, 300000)
 
-    async def test_deleted_slot_is_retired_and_never_reused(self):
+    async def test_deleted_slot_is_released_and_reusable(self):
         class Config(dict):
             def save_config(self):
                 self.saved = dict(self)
@@ -793,62 +796,154 @@ class RouterFeatureTests(unittest.IsolatedAsyncioTestCase):
         })
         plugin.router = None
         plugin._health_results = {6: {"ok": True}}
-        with mock.patch.object(
-            router_module, "request",
-            types.SimpleNamespace(
-                json=mock.AsyncMock(return_value={"delete_slots": [6]})),
-        ), mock.patch.object(
-            router_module, "json_response", side_effect=lambda data: data,
-        ), mock.patch.object(
-            plugin, "_reload_router", new_callable=mock.AsyncMock,
-        ):
-            result = await plugin.api_save_upstreams()
+        with tempfile.TemporaryDirectory() as tmp:
+            # 没有外部引用：删除后编号立即释放，可直接复用。
+            plugin._config_dir = Path(tmp)
+            plugin._main_config_path = Path(tmp) / "cmd_config.json"
+            plugin._main_config_path.write_text("{}")
+            with mock.patch.object(
+                router_module, "request",
+                types.SimpleNamespace(
+                    json=mock.AsyncMock(return_value={"delete_slots": [6]})),
+            ), mock.patch.object(
+                router_module, "json_response", side_effect=lambda data: data,
+            ), mock.patch.object(
+                plugin, "_reload_router", new_callable=mock.AsyncMock,
+            ):
+                result = await plugin.api_save_upstreams()
+            self.assertTrue(result["ok"])
+            self.assertNotIn("upstream_6", plugin.config)
+            # 新规则不再写退役清单。
+            self.assertNotIn("retired_slots", plugin.config)
+            self.assertNotIn(6, plugin._health_results)
+            self.assertTrue(plugin.config.saved)
+
+            with mock.patch.object(
+                router_module, "request",
+                types.SimpleNamespace(
+                    json=mock.AsyncMock(return_value={"upstream_6": upstream(6)})),
+            ), mock.patch.object(
+                router_module, "json_response", side_effect=lambda data: data,
+            ), mock.patch.object(
+                plugin, "_reload_router", new_callable=mock.AsyncMock,
+            ):
+                result = await plugin.api_save_upstreams()
         self.assertTrue(result["ok"])
-        self.assertNotIn("upstream_6", plugin.config)
-        self.assertEqual(plugin.config["retired_slots"], [6])
-        self.assertNotIn(6, plugin._health_results)
-        self.assertTrue(plugin.config.saved)
-        self.assertEqual(plugin.config.saved["retired_slots"], [6])
+        self.assertEqual(plugin.config["upstream_6"]["model"], "model-6")
+        self.assertEqual(plugin.config["upstream_6"]["api_base"], "https://example.invalid/v1")
 
-        # 重复删除同一槽位不会重复记录，也不会把已退役编号从清单里去掉。
-        with mock.patch.object(
-            router_module, "request",
-            types.SimpleNamespace(
-                json=mock.AsyncMock(return_value={"delete_slots": [6]})),
-        ), mock.patch.object(
-            router_module, "json_response", side_effect=lambda data: data,
-        ), mock.patch.object(
-            plugin, "_reload_router", new_callable=mock.AsyncMock,
-        ):
-            await plugin.api_save_upstreams()
-        self.assertEqual(plugin.config["retired_slots"], [6])
+    async def test_referenced_slot_reuse_is_rejected_without_mutation(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = dict(self)
 
-    def test_retired_slots_ignore_old_missing_and_invalid_values(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = Config({
+            "upstream_1": upstream(1),
+            "upstream_6": upstream(6),
+        })
+        plugin.router = None
+        plugin._health_results = {6: {"ok": True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin._config_dir = Path(tmp)
+            plugin._main_config_path = Path(tmp) / "cmd_config.json"
+            plugin._main_config_path.write_text("{}")
+            (Path(tmp) / "abconf_fixture.json").write_text(
+                json.dumps({
+                    "model": {"provider_id": "multi_api_router:upstream_6"},
+                    "fallback_provider_ids": ["multi_api_router:upstream_6"],
+                }),
+                encoding="utf-8",
+            )
+            # 同一请求里「删除再新增」等于复用该编号，必须被拒绝。
+            with mock.patch.object(
+                router_module, "request",
+                types.SimpleNamespace(json=mock.AsyncMock(return_value={
+                    "delete_slots": [6],
+                    "upstream_6": upstream(6),
+                })),
+            ), mock.patch.object(
+                router_module, "error_response",
+                side_effect=lambda message, status_code: (message, status_code),
+            ), mock.patch.object(
+                plugin, "_reload_router", new_callable=mock.AsyncMock,
+            ) as reload:
+                message, status = await plugin.api_save_upstreams()
+        self.assertEqual(status, 400)
+        self.assertIn("#6", message)
+        self.assertIn("abconf_fixture.json", message)
+        # 引用校验先于任何写入：删除与新增都未生效。
+        self.assertEqual(plugin.config["upstream_6"], upstream(6))
+        self.assertEqual(plugin._health_results, {6: {"ok": True}})
+        self.assertFalse(getattr(plugin.config, "saved", False))
+        reload.assert_not_awaited()
+
+    def test_legacy_retired_slots_only_feeds_migration_notice(self):
         plugin = object.__new__(router_module.MultiApiRouterPlugin)
         plugin.config = {"upstream_1": upstream(1)}
         # 旧配置没有 retired_slots 字段时视为空列表。
-        self.assertEqual(plugin._retired_slots(), [])
+        self.assertEqual(plugin._legacy_retired_slots(), [])
         plugin.config["retired_slots"] = ["6", 6, 0, 21, "bad", None]
-        self.assertEqual(plugin._retired_slots(), [6])
+        self.assertEqual(plugin._legacy_retired_slots(), [6])
         plugin.config["retired_slots"] = "6"
-        self.assertEqual(plugin._retired_slots(), [])
+        self.assertEqual(plugin._legacy_retired_slots(), [])
 
-    async def test_upstream_apis_expose_retired_slots(self):
+    async def test_legacy_retired_slots_do_not_block_reuse_and_are_dropped(self):
+        class Config(dict):
+            def save_config(self):
+                self.saved = dict(self)
+
         plugin = object.__new__(router_module.MultiApiRouterPlugin)
-        plugin.config = {
+        plugin.config = Config({
             "upstream_1": upstream(1),
-            "retired_slots": [4, 9],
-        }
+            "retired_slots": [4],
+        })
+        plugin.router = None
+        plugin._health_results = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin._config_dir = Path(tmp)
+            plugin._main_config_path = Path(tmp) / "cmd_config.json"
+            plugin._main_config_path.write_text("{}")
+            with mock.patch.object(
+                router_module, "request",
+                types.SimpleNamespace(
+                    json=mock.AsyncMock(return_value={"upstream_4": upstream(4)})),
+            ), mock.patch.object(
+                router_module, "json_response", side_effect=lambda data: data,
+            ), mock.patch.object(
+                plugin, "_reload_router", new_callable=mock.AsyncMock,
+            ):
+                result = await plugin.api_save_upstreams()
+        self.assertTrue(result["ok"])
+        self.assertIn("upstream_4", plugin.config)
+        self.assertNotIn("retired_slots", plugin.config)
+        self.assertNotIn("retired_slots", plugin.config.saved)
+
+    async def test_upstream_apis_expose_blocked_slots(self):
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {"upstream_1": upstream(1)}
         plugin.router = None
         plugin._health_results = {}
         plugin._health_inflight = set()
-        with mock.patch.object(
-            router_module, "json_response", side_effect=lambda data: data,
-        ):
-            config_payload = await plugin.api_upstreams_config()
-            public_payload = await plugin.api_upstreams()
-        self.assertEqual(config_payload["retired_slots"], [4, 9])
-        self.assertEqual(public_payload["retired_slots"], [4, 9])
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin._config_dir = Path(tmp)
+            plugin._main_config_path = Path(tmp) / "cmd_config.json"
+            plugin._main_config_path.write_text("{}")
+            (Path(tmp) / "abconf_fixture.json").write_text(
+                json.dumps({"model": {"provider_id": "multi_api_router:upstream_4"}}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                router_module, "json_response", side_effect=lambda data: data,
+            ):
+                config_payload = await plugin.api_upstreams_config()
+                public_payload = await plugin.api_upstreams()
+        self.assertEqual(config_payload["blocked_slots"], [4])
+        self.assertEqual(public_payload["blocked_slots"], [4])
+        self.assertEqual(
+            config_payload["blocked_slot_references"]["4"],
+            ["abconf_fixture.json$.model.provider_id"],
+        )
 
 
 class FakeEndpoint:
@@ -1153,6 +1248,138 @@ class ProviderRegistrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             for provider in plugin._router_instances:
                 await plugin._close_router_instance(provider)
+
+    async def test_disabled_auto_route_keeps_pinned_providers(self):
+        manager = types.SimpleNamespace(
+            inst_map={},
+            provider_insts=[],
+            providers_config=[],
+            provider_sources_config=[],
+        )
+
+        def register_provider(provider):
+            manager.provider_insts.append(provider)
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "enabled": False,
+            "provider_id": router_module.PROVIDER_TYPE,
+            "fallback_to_main_model": False,
+            "upstream_1": upstream(1),
+        }
+        plugin.context = types.SimpleNamespace(
+            provider_manager=manager,
+            register_provider=register_provider,
+        )
+        plugin._router_instances = []
+        plugin._public_provider_configs = []
+        plugin._health_results = {}
+        plugin.router = None
+
+        provider_id = await plugin._install_router_providers()
+        try:
+            self.assertEqual(provider_id, router_module.PROVIDER_TYPE)
+            # 父节点被撤销，但子 Provider 照常注册。
+            self.assertNotIn(router_module.PROVIDER_TYPE, manager.inst_map)
+            pinned_id = f"{router_module.PINNED_PROVIDER_PREFIX}1"
+            self.assertIn(pinned_id, manager.inst_map)
+            self.assertEqual(
+                {row["id"] for row in manager.providers_config},
+                {pinned_id},
+            )
+            self.assertEqual(
+                {row["id"] for row in manager.provider_sources_config},
+                {"api-1"},
+            )
+
+            # 子 Provider 仍可被直接点名调用。
+            pinned = manager.inst_map[pinned_id]
+            calls = []
+
+            async def fake_call(_self, item, **_kwargs):
+                calls.append(item.slot)
+                return "direct response"
+
+            pinned._call_once = types.MethodType(fake_call, pinned)
+            self.assertEqual(
+                await pinned.text_chat(prompt="hello"), "direct response"
+            )
+            self.assertEqual(calls, [1])
+        finally:
+            for provider in plugin._router_instances:
+                await plugin._close_router_instance(provider)
+
+    async def test_reload_disabling_switch_withdraws_parent_and_restores_bindings(self):
+        manager = types.SimpleNamespace(
+            inst_map={},
+            provider_insts=[],
+            providers_config=[],
+            provider_sources_config=[],
+        )
+
+        def register_provider(provider):
+            manager.provider_insts.append(provider)
+
+        class Config(dict):
+            def save_config(self):
+                self.saved = dict(self)
+
+        target_config = Config({"SUMMARY_PROVIDER_ID": "multi_api_router"})
+        metadata = types.SimpleNamespace(
+            name="astrbot_plugin_bilibili_ai_bot", config=target_config,
+        )
+
+        plugin = object.__new__(router_module.MultiApiRouterPlugin)
+        plugin.config = {
+            "enabled": True,
+            "provider_id": router_module.PROVIDER_TYPE,
+            "fallback_to_main_model": False,
+            "auto_bind_enabled": True,
+            "auto_bind_restore_on_disable": True,
+            "upstream_1": upstream(1),
+        }
+        plugin.context = types.SimpleNamespace(
+            provider_manager=manager,
+            register_provider=register_provider,
+        )
+        plugin._router_instances = []
+        plugin._public_provider_configs = []
+        plugin._health_results = {}
+        plugin.router = None
+        plugin._binding_lock = asyncio.Lock()
+        plugin._binding_messages = []
+        plugin._binding_state = {"version": 1, "bindings": {
+            "astrbot_plugin_bilibili_ai_bot:SUMMARY_PROVIDER_ID": {
+                "plugin": "astrbot_plugin_bilibili_ai_bot",
+                "path": ["SUMMARY_PROVIDER_ID"],
+                "original": "old-summary",
+                "applied": router_module.PROVIDER_TYPE,
+            },
+        }}
+        plugin._find_plugin_metadata = lambda name: (
+            metadata if name == "astrbot_plugin_bilibili_ai_bot" else None
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin._state_path = Path(tmp) / "auto_bindings.json"
+            try:
+                await plugin._install_router_providers()
+                self.assertIn(router_module.PROVIDER_TYPE, manager.inst_map)
+
+                plugin.config["enabled"] = False
+                await plugin._reload_router()
+
+                # 父节点撤销、子节点保留。
+                self.assertNotIn(router_module.PROVIDER_TYPE, manager.inst_map)
+                self.assertIn(
+                    f"{router_module.PINNED_PROVIDER_PREFIX}1", manager.inst_map
+                )
+                # 被自动写入的裸绑定回退到绑定前的原值。
+                self.assertEqual(target_config["SUMMARY_PROVIDER_ID"], "old-summary")
+                self.assertEqual(plugin._binding_state["bindings"], {})
+            finally:
+                for provider in plugin._router_instances:
+                    await plugin._close_router_instance(provider)
 
 
 if __name__ == "__main__":

@@ -6,9 +6,10 @@
     "hint": "默认关闭。关闭时接口只回显掩码（如 sk-a1b2****cdef），明文需在页面点击「显示」，且会记录审计日志。仅在需要回退旧行为时临时开启。"
   },
   "enabled": {
-    "description": "启用路由 Provider",
+    "description": "启用自动路由（父 Provider）",
     "type": "bool",
-    "default": true
+    "default": true,
+    "hint": "开启时注册 multi_api_router 自动路由节点，下游可选择它按顺序尝试各上游。关闭后整体自动路由入口消失，已自动写入的 BiliBot / memewiki 绑定会回退原值；但各上游仍注册为 multi_api_router:upstream_N，可被其他插件直接指定，不受影响。"
   },
   "provider_id": {
     "description": "整体模式 Provider ID（固定为 multi_api_router，只读）",
