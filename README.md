@@ -5,7 +5,7 @@
 ![Banner](.github/img/Banner.png)
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29%2B-50bda3)](https://github.com/AstrBotDevs/AstrBot)
-![Version](https://img.shields.io/badge/Version-1.3.4-e9b949)
+![Version](https://img.shields.io/badge/Version-1.3.5-e9b949)
 [![Stars](https://img.shields.io/github/stars/AKIhunter/astrbot_plugin_multi_api_router?style=flat&color=e9b949)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AKIhunter/astrbot_plugin_multi_api_router)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/commits/main)
 
@@ -27,7 +27,7 @@ AstrBot 原生 Provider 接口，插件在内部完成排序、健康跳过、�
 | 在所有上游失败后继续服务 | 整体模式可回退 AstrBot 主模型一次 |
 | 让工具请求只走兼容模型 | 带工具时过滤未声明工具能力的上游 |
 | 控制推理模型是否思考 | 每个上游独立设置，默认关闭 |
-| 快速调整优先顺序 | 拖动整条 API，页面编号自动重排 |
+| 快速调整优先顺序 | 拖动整条 API，调用顺序随位置变化，槽位编号保持不变 |
 | 限制整条降级链耗时 | 设置路由总超时，超时后停止后续 API 和回退 |
 | 区分不同模型协议 | 为每个 API 标记聊天、生图、Embedding、语音等类型 |
 
@@ -57,6 +57,10 @@ AstrBot 原生 Provider 接口，插件在内部完成排序、健康跳过、�
 
 新增 API 默认启用、默认声明支持工具调用、默认关闭思考能力。若上游不支持
 function calling，请手动取消“支持工具调用”。
+
+新增或替换 API Key 后，可直接点击“保存并生效”；获取模型也会使用当前填写的
+Key。已有掩码未修改时沿用原 Key。旧版若保存后条目消失，请新增并重新填写完整
+配置，详见 [API Key 编辑与保存](docs/api-key-editing.md)。
 
 取消“启用路由”后，该 API 不再参加整体自动路由，但配置不会停用。配置完整的
 聊天、图转文和多模态 API 仍保留专属 Provider，可被其他插件直接指定使用。
@@ -128,7 +132,7 @@ ASR 和多模态。聊天、图转文、多模态使用 Chat Completions；其�
 ### 排序、保存与撤销
 
 - 按住左侧三点拖动整条 API，上方线路优先调用。
-- 页面编号按当前位置自动显示为 `#1`、`#2`、`#3`。
+- 页面 `#编号` 是固定槽位号，对应 `multi_api_router:upstream_N`；排序不会改号。
 - 任意配置变化都会显示底部保存提示。
 - 点击 **保存并生效** 会立即落盘并热重载。
 - 点击 **取消并撤销** 或页面空白处，会恢复上一步输入、开关、新增、删除或排序。
@@ -277,6 +281,12 @@ print(resp.completion_text)
 该开关只控制是否参加整体自动路由。固定选择是独立入口，便于临时移出自动链路
 后继续做单 API 测试或专用任务。
 
+**为什么旧版填了 Key 仍提示缺少配置，取消路由保存后条目又消失？**
+旧版页面可能把刚输入的 Key 误当作服务器已保存值，导致提交时漏掉 Key。
+`v1.3.5` 已修复。缺失的 Key 无法自动恢复：条目还在时重新填写 Key，
+条目已消失时新增并补齐 API Base、Key 和模型 ID，再保存。
+详见 [API Key 编辑与保存](docs/api-key-editing.md)。
+
 **为什么 Embedding、TTS 等类型没有出现在聊天模型选择器？**
 这些 API 不属于 Chat Completions，插件不会伪装协议。分类用于保存能力边界和
 按真实端点健康检测；当前 AstrBot 聊天 Provider 只注册聊天、图转文和多模态。
@@ -329,21 +339,12 @@ BiliBot / memewiki 裸 `multi_api_router` 绑定会同时回退到绑定前的�
 
 ## 更新日志
 
-当前版本：`v1.3.4`
+当前版本：`v1.3.5`
 
-- 错误分类统一为 `classify() -> (category, disposition)`，`_retryable_error` 完全委托分类结果。
-- 同一上游默认最多重试 1 次；429 优先遵守 `Retry-After`，剩余总预算不足时直接切换。
-- 新增 429 的 `received` / `resolved` / `route` 三段限流留痕，只用于区分限流与配额耗尽。
-- 真实调用成功通过 `health_recorder` 写回健康，立即解除该槽位的健康跳过。
-- 健康跳过只在 `health_skip_ttl_seconds` 有效期内生效，指定上游不被跳过。
-- 页面健康检测输出预算由 8 提到 256 token，修复思考型模型“200 但正文为空”。
-
-[完整更新日志](CHANGELOG.md)
-- 接入健康检查跳过、连续失败暂停和主模型回退。
-- 支持整行拖拽排序与自动编号。
-- 新增上游默认启用，工具能力默认开启，思考能力默认关闭。
-- 配置变化显示底部保存提示，支持撤销上一步操作。
-- 帮助手册补充全局设置、故障行为和常见搭配示例。
+- 修复新增或替换 API Key 在编辑快照后漏提交，导致保存失败或条目消失的问题。
+- 获取模型使用当前输入的 Key；已有掩码或未修改的揭示值仍沿用服务器密钥。
+- 补充 Key 编辑与旧版缺失配置的处理说明，校正固定槽位号与重试说明。
+- 配置结构和 Provider ID 保持兼容，无需迁移。
 
 完整版本记录请查看 [CHANGELOG.md](CHANGELOG.md)。
 

@@ -157,6 +157,15 @@ function cloneValue(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function canReuseSavedApiKey(keyValue, upstream) {
+  // api_key 会被编辑快照更新，不能拿它判断服务器是否已有这个 Key。
+  // 新填或替换的明文始终提交；仅掩码、未改动的揭示值沿用服务器密钥。
+  return Boolean(keyValue && (
+    keyValue.includes("****")
+    || (upstream?._keyRevealed && keyValue === (upstream._revealedApiKey || ""))
+  ));
+}
+
 function syncStateFromForm() {
   const global = { ...state.global };
   globalFields.querySelectorAll("[data-global-key]").forEach((input) => {
@@ -511,11 +520,8 @@ function render() {
         showToast(`${upstreamLabel(upstream.slot)} 请先填写 API Base`, true);
         return;
       }
-      // 未编辑（仍是掩码、加载值或「显示」出来的原文）时不提交 key，
-      // 改传 slot 让后端读取已保存密钥。
-      const keyUnchanged = apiKey.includes("****")
-        || apiKey === (upstream.api_key || "")
-        || (upstream._keyRevealed && apiKey === (upstream._revealedApiKey || ""));
+      // 与保存使用同一判定，避免把刚填入编辑态的新 Key 当作已保存。
+      const keyUnchanged = canReuseSavedApiKey(apiKey, upstream);
       const requestBody = { api_base: apiBase };
       if (keyUnchanged) requestBody.slot = upstream.slot;
       else requestBody.api_key = apiKey;
@@ -814,16 +820,8 @@ function collectPayload() {
     const order = visibleArticles.indexOf(article);
     const stateItem = state.upstreams.find((item) => Number(item.slot) === Number(slot));
     const keyValue = article.querySelector(".api-key").value.trim();
-    // 未编辑判定：仍是掩码、仍等于加载值、或仍是「显示」出来的原文。
-    // 命中时省略 api_key，由后端沿用已保存密钥，避免把真 Key 覆盖成星号。
-    const keyUnchanged = Boolean(
-      keyValue
-      && (
-        keyValue.includes("****")
-        || keyValue === (stateItem?.api_key || "")
-        || (stateItem?._keyRevealed && keyValue === (stateItem._revealedApiKey || ""))
-      ),
-    );
+    // 只有服务器返回的掩码或未改动的揭示值才可省略 api_key。
+    const keyUnchanged = canReuseSavedApiKey(keyValue, stateItem);
     const payloadItem = {
       route_enabled: article.querySelector(".upstream-enabled").checked,
       api_type: article.querySelector(".api-type").value,
