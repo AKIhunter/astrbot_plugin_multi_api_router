@@ -111,6 +111,10 @@ class ErrorClassificationMatrixTests(unittest.TestCase):
                 )
 
     def test_retry_after_parsing(self):
+        for value in ("nan", "NaN", "inf", "-inf", "1e9999"):
+            with self.subTest(value=value):
+                self.assertIsNone(router_module._retry_after_seconds(
+                    status_error(429, headers={"retry-after": value})))
         self.assertEqual(
             router_module._retry_after_seconds(
                 status_error(429, headers={"retry-after": "2"})

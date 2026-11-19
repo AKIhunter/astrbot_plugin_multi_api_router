@@ -5,7 +5,7 @@
 ![Banner](.github/img/Banner.png)
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29%2B-50bda3)](https://github.com/AstrBotDevs/AstrBot)
-![Version](https://img.shields.io/badge/Version-1.3.5-e9b949)
+![Version](https://img.shields.io/badge/Version-1.3.6-e9b949)
 [![Stars](https://img.shields.io/github/stars/AKIhunter/astrbot_plugin_multi_api_router?style=flat&color=e9b949)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AKIhunter/astrbot_plugin_multi_api_router)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/commits/main)
 
@@ -283,7 +283,7 @@ print(resp.completion_text)
 
 **为什么旧版填了 Key 仍提示缺少配置，取消路由保存后条目又消失？**
 旧版页面可能把刚输入的 Key 误当作服务器已保存值，导致提交时漏掉 Key。
-`v1.3.5` 已修复。缺失的 Key 无法自动恢复：条目还在时重新填写 Key，
+`v1.3.6` 已修复。缺失的 Key 无法自动恢复：条目还在时重新填写 Key，
 条目已消失时新增并补齐 API Base、Key 和模型 ID，再保存。
 详见 [API Key 编辑与保存](docs/api-key-editing.md)。
 
@@ -339,7 +339,7 @@ BiliBot / memewiki 裸 `multi_api_router` 绑定会同时回退到绑定前的�
 
 ## 更新日志
 
-当前版本：`v1.3.5`
+当前版本：`v1.3.6`
 
 - 修复新增或替换 API Key 在编辑快照后漏提交，导致保存失败或条目消失的问题。
 - 获取模型使用当前输入的 Key；已有掩码或未修改的揭示值仍沿用服务器密钥。

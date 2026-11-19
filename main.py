@@ -321,7 +321,9 @@ def _retry_after_seconds(error: object) -> float | None:
     if not text:
         return None
     try:
-        return max(0.0, float(text))
+        seconds = float(text)
+        # NaN/Infinity are not valid durations; retain the configured retry fallback.
+        return max(0.0, seconds) if math.isfinite(seconds) else None
     except ValueError:
         pass
     try:
@@ -1535,7 +1537,7 @@ class MultiApiRouterProvider(Provider):
     PLUGIN_NAME,
     "AKIhunter",
     "多个 OpenAI 兼容 API 的优先级路由、异常重试与自动降级 Provider",
-    "1.3.5",
+    "1.3.6",
 )
 class MultiApiRouterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
