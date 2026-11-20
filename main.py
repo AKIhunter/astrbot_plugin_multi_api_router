@@ -1537,7 +1537,7 @@ class MultiApiRouterProvider(Provider):
     PLUGIN_NAME,
     "AKIhunter",
     "多个 OpenAI 兼容 API 的优先级路由、异常重试与自动降级 Provider",
-    "1.3.6",
+    "1.3.7",
 )
 class MultiApiRouterPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):

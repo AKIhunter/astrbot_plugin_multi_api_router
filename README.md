@@ -5,7 +5,7 @@
 ![Banner](.github/img/Banner.png)
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.29%2B-50bda3)](https://github.com/AstrBotDevs/AstrBot)
-![Version](https://img.shields.io/badge/Version-1.3.6-e9b949)
+![Version](https://img.shields.io/badge/Version-1.3.7-e9b949)
 [![Stars](https://img.shields.io/github/stars/AKIhunter/astrbot_plugin_multi_api_router?style=flat&color=e9b949)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AKIhunter/astrbot_plugin_multi_api_router)](https://github.com/AKIhunter/astrbot_plugin_multi_api_router/commits/main)
 
@@ -339,8 +339,9 @@ BiliBot / memewiki 裸 `multi_api_router` 绑定会同时回退到绑定前的�
 
 ## 更新日志
 
-当前版本：`v1.3.6`
+当前版本：`v1.3.7`
 
+- 版本标识与页面脚本缓存统一为 1.3.7，功能行为沿用 1.3.6。
 - 忽略 `Retry-After` 中的 NaN、Infinity 与溢出值，避免异常等待时间进入重试调度；有效秒数和 HTTP 日期仍按原策略处理。
 - 保留新增或替换 API Key 的保存修复；获取模型使用当前输入的 Key，未修改的掩码或揭示值沿用服务器密钥。
 - 配置结构和 Provider ID 保持兼容，无需迁移。
